@@ -1,0 +1,18 @@
+{
+  "name": "quota-pet",
+  "productName": "QuotaPet",
+  "version": "0.1.0",
+  "description": "仿 Codex 桌宠的额度桌宠：点击查看 Codex / Claude 的 5 小时与每周额度，以及 DeepSeek 余额和消费",
+  "main": "main.js",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "selftest": "electron . --selftest",
+    "test": "node --test \"test/*.test.js\"",
+    "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1"
+  },
+  "devDependencies": {
+    "electron": "44.5.1"
+  }
+}

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>额度桌宠 · 设置</title>
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main class="page">
+      <h1>设置</h1>
+
+      <section class="group">
+        <h2>外观</h2>
+        <div class="row">
+          <span class="label">主题</span>
+          <div class="seg" id="themes" role="radiogroup" aria-label="主题">
+            <button type="button" data-theme="system">跟随系统</button>
+            <button type="button" data-theme="light">浅色</button>
+            <button type="button" data-theme="dark">深色</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>DeepSeek</h2>
+        <div class="row stack">
+          <div class="row-head">
+            <label for="ds-key">API Key</label>
+            <span class="status" id="ds-status"></span>
+          </div>
+          <div class="key-input">
+            <input id="ds-key" type="password" placeholder="sk-…（只保存在本机，用 Windows 加密存储）" autocomplete="off" spellcheck="false" />
+            <button class="ghost" id="ds-eye" type="button" title="显示/隐藏">显示</button>
+          </div>
+          <div class="actions">
+            <button class="primary" id="ds-save" type="button">保存并验证</button>
+            <button class="ghost danger" id="ds-clear" type="button">清除</button>
+            <button class="link" id="ds-open" type="button">去 DeepSeek 开放平台创建 Key ↗</button>
+          </div>
+          <div class="result" id="ds-result" role="status"></div>
+        </div>
+        <div class="row">
+          <label for="lowBalance">余额低于多少时提醒</label>
+          <div class="unit-input"><span>¥</span><input id="lowBalance" type="number" min="0" step="1" /></div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>额度</h2>
+        <div class="row">
+          <label for="alertPercent">Codex / Claude 剩余低于多少时提醒</label>
+          <div class="unit-input"><input id="alertPercent" type="number" min="1" max="50" step="1" /><span>%</span></div>
+        </div>
+        <div class="row">
+          <label for="refreshMinutes">自动刷新间隔</label>
+          <select id="refreshMinutes">
+            <option value="1">1 分钟</option>
+            <option value="3">3 分钟</option>
+            <option value="5">5 分钟</option>
+            <option value="10">10 分钟</option>
+            <option value="15">15 分钟</option>
+            <option value="30">30 分钟</option>
+          </select>
+        </div>
+        <div class="row">
+          <span class="label">面板里显示</span>
+          <div class="checks">
+            <label><input type="checkbox" data-provider="codex" /> Codex</label>
+            <label><input type="checkbox" data-provider="claude" /> Claude</label>
+            <label><input type="checkbox" data-provider="deepseek" /> DeepSeek</label>
+          </div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>宠物</h2>
+        <div class="pets" id="pets"></div>
+        <div class="hint" id="pets-hint"></div>
+        <div class="row">
+          <span class="label">大小</span>
+          <div class="seg" id="sizes">
+            <button type="button" data-scale="0.45">小</button>
+            <button type="button" data-scale="0.6">中</button>
+            <button type="button" data-scale="0.8">大</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="eyeFollow">眼睛跟着鼠标（新版精灵图才支持）</label>
+          <input class="switch" id="eyeFollow" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="idleSelfPlay">闲着时做小动作</label>
+          <input class="switch" id="idleSelfPlay" type="checkbox" />
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>启动与网络</h2>
+        <div class="row">
+          <label for="autoStart">开机自动启动</label>
+          <input class="switch" id="autoStart" type="checkbox" />
+        </div>
+        <div class="row stack">
+          <label for="proxy">代理（留空则跟随系统代理）</label>
+          <input id="proxy" type="text" placeholder="例如 http://127.0.0.1:7897" spellcheck="false" />
+        </div>
+        <div class="row stack">
+          <label for="codexPath">codex 程序路径（留空自动查找）</label>
+          <input id="codexPath" type="text" spellcheck="false" />
+        </div>
+      </section>
+
+      <details class="group about">
+        <summary>数据从哪来？</summary>
+        <ul>
+          <li><b>Codex</b>：调用本机 Codex 自带的 <code>codex app-server</code> 读取 <code>account/rateLimits/read</code>，和 Codex 里 /status 看到的是同一份数据；不可用时改用 <code>~/.codex/auth.json</code> 直连官方接口（只读，不刷新令牌）。</li>
+          <li><b>Claude</b>：如果在终端用 <code>claude</code> 登录过 Claude Code，就读取官方用量接口，能拿到精确的重置时间；否则读取 Claude 桌面端自己记录的 <code>plan-usage-history.json</code>，重置时间是推算的。</li>
+          <li><b>DeepSeek</b>：官方 <code>/user/balance</code> 接口只提供余额，“今日 / 本月消费”是桌宠根据余额变化在本地推算的，从第一次查询开始累计。</li>
+        </ul>
+      </details>
+    </main>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="shared.js"></script>
+    <script src="settings.js"></script>
+  </body>
+</html>

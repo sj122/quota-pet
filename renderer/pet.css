@@ -1,0 +1,130 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: var(--font);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.sprite {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: var(--sprite-w, 115px);
+  height: var(--sprite-h, 125px);
+  transform: translateX(-50%);
+  background-repeat: no-repeat;
+  cursor: pointer;
+  will-change: background-position;
+}
+
+.sprite.dragging {
+  cursor: grabbing;
+}
+
+/* 没有找到 Codex 宠物时的兜底形象：一颗会呼吸的小圆球 */
+.sprite.orb::before {
+  content: "";
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  bottom: 6%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff 0 6%, #9fb1ff 7% 30%, #4d6bfe 70%, #3346c8);
+  box-shadow: inset -6px -8px 14px rgba(0, 0, 0, 0.18);
+  animation: breathe 3.2s ease-in-out infinite;
+}
+
+.sprite.orb::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 34%;
+  width: 34%;
+  height: 9%;
+  transform: translateX(-50%);
+  background: radial-gradient(circle at 22% 50%, #1b1b1f 0 30%, transparent 32%),
+    radial-gradient(circle at 78% 50%, #1b1b1f 0 30%, transparent 32%);
+  animation: blink 4.6s infinite;
+}
+
+@keyframes breathe {
+  50% {
+    transform: translateY(-4%) scale(1.02);
+  }
+}
+
+@keyframes blink {
+  0%,
+  92%,
+  100% {
+    transform: translateX(-50%) scaleY(1);
+  }
+  95% {
+    transform: translateX(-50%) scaleY(0.1);
+  }
+}
+
+.bubble {
+  position: absolute;
+  left: 50%;
+  bottom: var(--bubble-bottom, 130px);
+  width: max-content;
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
+  padding: 7px 12px 8px;
+  border-radius: 14px;
+  background: var(--bubble-bg);
+  color: var(--text);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16), 0 0 0 1px var(--line);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translate(-50%, 6px) scale(0.96);
+  transform-origin: 50% 100%;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+  cursor: pointer;
+}
+
+.bubble.show {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+}
+
+.bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 10px;
+  height: 10px;
+  background: var(--bubble-bg);
+  transform: translateX(-50%) rotate(45deg);
+  box-shadow: 1px 1px 0 0 var(--line);
+}
+
+.bubble[data-tone="warn"] {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16), 0 0 0 1.5px var(--warn);
+}
+
+.bubble .line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sprite.orb::before,
+  .sprite.orb::after {
+    animation: none;
+  }
+  .bubble {
+    transition: none;
+  }
+}

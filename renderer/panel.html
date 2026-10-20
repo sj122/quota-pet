@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>额度一览</title>
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <main class="card" id="card">
+      <header class="head">
+        <div class="avatar" id="avatar"></div>
+        <div class="head-text">
+          <div class="title">额度一览</div>
+          <div class="sub" id="sub">正在读取…</div>
+        </div>
+        <div class="head-actions">
+          <button class="icon-btn" id="btn-refresh" title="立即刷新" aria-label="立即刷新">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+              <path d="M20 4v7h-7" />
+            </svg>
+          </button>
+          <button class="icon-btn" id="btn-settings" title="设置" aria-label="设置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" />
+              <circle cx="16" cy="6" r="2" />
+              <circle cx="10" cy="12" r="2" />
+              <circle cx="18" cy="18" r="2" />
+            </svg>
+          </button>
+          <button class="icon-btn" id="btn-close" title="收起" aria-label="收起">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+      </header>
+      <div id="list"></div>
+      <footer class="foot">
+        <span id="foot-text" title="右键宠物可以换造型、调大小"></span>
+        <div class="theme-seg" id="theme-seg" role="radiogroup" aria-label="外观">
+          <button type="button" data-theme="system">跟随系统</button>
+          <button type="button" data-theme="light">浅色</button>
+          <button type="button" data-theme="dark">深色</button>
+        </div>
+      </footer>
+    </main>
+    <script src="shared.js"></script>
+    <script src="panel.js"></script>
+  </body>
+</html>

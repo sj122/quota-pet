@@ -1,0 +1,12 @@
+node_modules/
+out/
+*.log
+.snapshots/
+
+# 本地环境与编辑器
+.env
+.env.*
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
