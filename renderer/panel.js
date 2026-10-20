@@ -71,7 +71,7 @@
       if (now - d.sampledAt > 45 * 60e3) {
         html += note(`桌面端最近一次记录在${QP.ago(d.sampledAt, now)}，打开 Claude 桌面端会自动更新`, 'warn');
       } else {
-        html += note('数据来自 Claude 桌面端的用量记录，重置时间是根据记录推算的');
+        html += note('数据来自 Claude 桌面端的用量记录（约每 15 分钟一条，手动刷新不会更快），重置时间是推算的');
       }
     }
     if (d.note) html += note(d.note, 'warn');
@@ -205,7 +205,7 @@
 
   function fit() {
     const rect = card.getBoundingClientRect();
-    api.panelResize(Math.ceil(rect.height) + 28);
+    api.panelResize(Math.ceil(rect.height) + 40);
   }
 
   new ResizeObserver(fit).observe(card);

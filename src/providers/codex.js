@@ -173,7 +173,8 @@ function normalizeWham(j, now = Date.now()) {
   };
 }
 
-// 备用通路：直接用 ~/.codex/auth.json 里的令牌请求 chatgpt.com。只读，不刷新令牌，避免把 Codex 挤下线。
+// 优先通路：直接用 ~/.codex/auth.json 里的令牌查询，无需启动 codex 进程。
+// 只读登录缓存；令牌续期交给备用的官方 app-server 处理。
 async function readViaHttp(fetchImpl) {
   let auth;
   try {
@@ -190,30 +191,33 @@ async function readViaHttp(fetchImpl) {
       'User-Agent': `quota-pet/${CLIENT_VERSION}`,
       Accept: 'application/json',
     },
+    redirect: 'error',
   });
-  if (res.status === 401 || res.status === 403) throw new Error('Codex 登录已过期，打开一次 Codex 就会自动续期');
+  if (res.status === 401) throw new Error('Codex 登录令牌已失效');
+  if (res.status === 403) throw new Error('Codex 直连接口拒绝访问');
   if (!res.ok) throw new Error(`Codex 接口返回 HTTP ${res.status}`);
   return normalizeWham(await res.json());
 }
 
 async function fetchCodex({ fetchImpl, codexPath } = {}) {
-  const exe = findCodexExe(codexPath);
-  let appServerError = null;
-  if (exe) {
-    try {
-      return { ...normalizeAppServer(await readViaAppServer(exe)), exe };
-    } catch (e) {
-      appServerError = e;
-    }
-  }
+  let httpError;
   try {
-    const data = await readViaHttp(fetchImpl);
-    if (appServerError) data.note = `codex app-server 不可用，已改用直连接口（${appServerError.message}）`;
-    return data;
+    return await readViaHttp(fetchImpl);
   } catch (e) {
-    if (appServerError) throw new Error(`${appServerError.message}；直连也失败：${e.message}`);
-    if (!exe) throw new Error(`没找到 codex 程序，直连也失败：${e.message}`);
-    throw e;
+    httpError = e;
+  }
+
+  // 仅在令牌缺失、过期或直连接口不可用时才启动一次官方后台进程。
+  const exe = findCodexExe(codexPath);
+  if (!exe) throw new Error(`Codex 令牌直连失败：${httpError.message}；未找到 codex 程序用于备用查询`);
+  try {
+    return {
+      ...normalizeAppServer(await readViaAppServer(exe)),
+      exe,
+      note: `令牌直连暂不可用，已通过 codex 后台查询（${httpError.message}）`,
+    };
+  } catch (e) {
+    throw new Error(`Codex 令牌直连失败：${httpError.message}；备用查询也失败：${e.message}`);
   }
 }
 

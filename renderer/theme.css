@@ -19,9 +19,11 @@
   --claude: #d97757;
   --deepseek: #4d6bfe;
   --link: #3c5ee8;
+  --primary: #3c5ee8; /* 实心按钮底色，上面放白字 */
 
   --bubble-bg: rgba(255, 255, 255, 0.97);
-  --shadow: 0 10px 28px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08);
+  /* 投影要在面板窗口 20px 的透明边距内完全淡掉，否则会在窗口边缘被切出一圈灰边 */
+  --shadow: 0 4px 12px rgba(0, 0, 0, 0.14), 0 1px 2px rgba(0, 0, 0, 0.08);
   color-scheme: light;
 }
 
@@ -44,9 +46,10 @@
     --claude: #e8916f;
     --deepseek: #8197ff;
     --link: #8ea2ff;
+    --primary: #4a62e8;
 
     --bubble-bg: rgba(40, 40, 45, 0.97);
-    --shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
     color-scheme: dark;
   }
 }

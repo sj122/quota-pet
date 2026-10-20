@@ -39,8 +39,8 @@ const SNAPSHOT_DIR = argValue('--snapshot');
 const DEMO = process.argv.includes('--demo');
 
 const PET_PAD_TOP = 84; // 宠物头顶留给气泡的高度
-const PANEL_WIDTH = 372; // 含四周阴影留白
-const PANEL_MARGIN = 14;
+const PANEL_WIDTH = 384; // 卡片 344 + 两侧各 20px 投影留白
+const PANEL_MARGIN = 20;
 const EXTERNAL_HOSTS = ['platform.deepseek.com'];
 const THEMES = [
   { label: '跟随系统', value: 'system' },
@@ -554,13 +554,17 @@ function watchClaudeDesktop() {
 // 渲染进程拿不到窗口外的鼠标位置，由主进程轮询后转发（用于眼睛跟随和穿透判断）
 function startCursorPolling() {
   let last = '';
+  let lastSentAt = 0;
   cursorTimer = setInterval(() => {
     if (!petWin || petWin.isDestroyed() || !petWin.isVisible()) return;
     const p = screen.getCursorScreenPoint();
     const b = petWin.getBounds();
     const key = `${p.x},${p.y},${b.x},${b.y}`;
-    if (key === last) return;
+    const now = Date.now();
+    // 静止时也定期校准，避免窗口隐藏/恢复或重载后沿用旧的穿透状态。
+    if (key === last && now - lastSentAt < 1000) return;
     last = key;
+    lastSentAt = now;
     petWin.webContents.send('pet:cursor', { x: p.x - b.x, y: p.y - b.y });
   }, 50);
 }
@@ -800,7 +804,10 @@ async function runSnapshot(dir) {
   await sleep(200);
   wc.sendInputEvent({ type: 'mouseDown', x: cx, y: cy, globalX: gx, globalY: gy, button: 'left', clickCount: 1 });
   for (let i = 1; i <= 8; i++) {
-    wc.sendInputEvent({ type: 'mouseMove', x: cx + i * 8, y: cy, globalX: gx + i * 8, globalY: gy, button: 'left' });
+    wc.sendInputEvent({
+      type: 'mouseMove', x: cx + i * 8, y: cy, globalX: gx + i * 8, globalY: gy,
+      button: 'left', modifiers: ['leftButtonDown'],
+    });
     await sleep(40);
   }
   await capture(petWin, path.join(dir, 'pet-dragging.png'));

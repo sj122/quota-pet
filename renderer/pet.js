@@ -39,6 +39,8 @@
     const x = pet.columns > 1 ? (f.col / (pet.columns - 1)) * 100 : 0;
     const y = pet.rows > 1 ? (f.row / (pet.rows - 1)) * 100 : 0;
     spriteEl.style.backgroundPosition = `${x}% ${y}%`;
+    // 动画也会改变鼠标下的透明像素，不能只等鼠标移动再更新穿透。
+    syncHitTest();
   }
 
   function play(state, opts = {}) {
@@ -121,15 +123,26 @@
     return false;
   }
 
-  function onPointer(x, y) {
-    lastPointer = { x, y };
+  function setInteractive(over) {
+    if (over === interactive) return;
+    interactive = over;
+    api.setIgnoreMouse(!over);
+  }
+
+  // 这里只同步原生命中状态，不触发悬停/看向动画，避免换帧递归。
+  function syncHitTest() {
+    if (!lastPointer) return;
+    const { x, y } = lastPointer;
     const onBubble = bubbleVisible() && inRect(x, y, bubbleEl.getBoundingClientRect());
     const onPet = !onBubble && hitPet(x, y);
     const over = Boolean(pressed) || onBubble || onPet;
-    if (over !== interactive) {
-      interactive = over;
-      api.setIgnoreMouse(!over);
-    }
+    setInteractive(over);
+    return { onBubble, onPet, over };
+  }
+
+  function onPointer(x, y) {
+    lastPointer = { x, y };
+    const { onBubble, onPet, over } = syncHitTest();
     if (onPet && !hovering) startHover();
     else if (!onPet && hovering && !pressed) endHover();
     if (bubbleKind === 'summary') {
@@ -164,7 +177,10 @@
     bubbleEl.dataset.tone = tone;
     bubbleEl.hidden = false;
     bubbleKind = kind;
-    requestAnimationFrame(() => bubbleEl.classList.add('show'));
+    requestAnimationFrame(() => {
+      bubbleEl.classList.add('show');
+      syncHitTest();
+    });
     if (ttl) bubbleTimer = setTimeout(hideBubble, ttl);
   }
 
@@ -173,6 +189,7 @@
     cancelHide();
     bubbleEl.classList.remove('show');
     bubbleKind = null;
+    syncHitTest();
     setTimeout(() => {
       if (!bubbleEl.classList.contains('show')) bubbleEl.hidden = true;
     }, 220);
@@ -205,13 +222,22 @@
 
   spriteEl.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    spriteEl.setPointerCapture(e.pointerId);
-    pressed = { x: e.screenX, y: e.screenY, lastX: e.screenX, moved: false };
+    // 上一次若漏收松手事件，新的一次按下也必须能恢复正常。
+    release(null, true);
+    pressed = { pointerId: e.pointerId, x: e.screenX, y: e.screenY, lastX: e.screenX, moved: false };
+    setInteractive(true);
     api.dragStart();
+    try {
+      spriteEl.setPointerCapture(e.pointerId);
+    } catch {} // 捕获失效时仍由 window 的松手/移动事件结束本次操作。
   });
 
   spriteEl.addEventListener('pointermove', (e) => {
-    if (!pressed) return;
+    if (!pressed || e.pointerId !== pressed.pointerId) return;
+    if ((e.buttons & 1) === 0) {
+      release(e, true);
+      return;
+    }
     const dx = e.screenX - pressed.x;
     const dy = e.screenY - pressed.y;
     if (!pressed.moved && Math.hypot(dx, dy) >= 4) {
@@ -231,18 +257,22 @@
   });
 
   function release(e, cancelled) {
-    if (!pressed) return;
-    const moved = pressed.moved;
+    if (!pressed || (e && e.pointerId !== pressed.pointerId)) return;
+    const { moved, pointerId } = pressed;
     pressed = null;
     dragging = false;
     spriteEl.classList.remove('dragging');
     try {
-      spriteEl.releasePointerCapture(e.pointerId);
+      spriteEl.releasePointerCapture(pointerId);
     } catch {}
     api.dragEnd();
     lastActivity = Date.now();
+    if (e && Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+      lastPointer = { x: e.clientX, y: e.clientY };
+    }
     if (moved) play('idle');
     else if (!cancelled) api.petClick();
+    syncHitTest();
   }
 
   spriteEl.addEventListener('pointerup', (e) => release(e, false));
@@ -250,14 +280,17 @@
   // 兜底：指针捕获意外丢失、或松手时落在宠物外面，也要结束拖动
   spriteEl.addEventListener('lostpointercapture', (e) => release(e, true));
   window.addEventListener('pointerup', (e) => release(e, !pressed || !pressed.moved));
-  window.addEventListener('blur', () => {
-    if (pressed) release({ pointerId: 1 }, true);
-  });
+  window.addEventListener('blur', () => release(null, true));
   window.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     api.petMenu();
   });
-  window.addEventListener('mousemove', (e) => onPointer(e.clientX, e.clientY));
+  window.addEventListener('mousemove', (e) => {
+    // 非聚焦的透明窗口可能漏收 pointerup；下次移动时用真实按钮状态纠正。
+    // 保留 mousemove：Windows 的穿透转发路径只保证转发鼠标移动消息。
+    if (pressed && (e.buttons & 1) === 0) release(null, true);
+    onPointer(e.clientX, e.clientY);
+  });
   api.onCursor(({ x, y }) => {
     if (!pressed) onPointer(x, y);
   });
@@ -270,22 +303,27 @@
     refreshing = Boolean(snap && snap.refreshing);
     if (refreshing && !was && !dragging && !looking) play('running', { loop: true });
     if (!refreshing && was) afterRefresh();
+    // 静默更新（比如 Claude 桌面端刚写了新记录）也要马上检查告急
+    else if (!refreshing) showNewAlerts();
     if (bubbleKind === 'summary') showSummary();
   }
 
-  function afterRefresh() {
+  // 只提醒新出现的告急项；返回是否弹了提醒
+  function showNewAlerts() {
     const active = QP.alerts(snapshot, cfg);
     const fresh = active.filter((a) => !shownAlerts.has(a.key));
     shownAlerts = new Set(active.map((a) => a.key));
-    if (dragging) return;
-    if (fresh.length) {
-      play('failed');
-      showBubble(
-        fresh.slice(0, 3).map((a) => a.text),
-        { kind: 'alert', tone: 'warn', ttl: 10000 }
-      );
-      return;
-    }
+    if (dragging || !fresh.length) return false;
+    play('failed');
+    showBubble(
+      fresh.slice(0, 3).map((a) => a.text),
+      { kind: 'alert', tone: 'warn', ttl: 10000 }
+    );
+    return true;
+  }
+
+  function afterRefresh() {
+    if (showNewAlerts() || dragging) return;
     const slots = ['codex', 'claude', 'deepseek'].map((n) => snapshot[n]).filter((s) => s && s.status !== 'off');
     if (slots.length && slots.every((s) => s.status === 'error')) play('waiting');
     else if (panelVisible) play('review', { repeat: 1 });
@@ -310,6 +348,7 @@
     const data = new Uint8Array(w * h);
     for (let i = 0; i < data.length; i++) data[i] = rgba[i * 4 + 3];
     alphaMap = { data, w, h };
+    syncHitTest();
   }
 
   // 某一格里不透明像素的包围盒（原图像素，相对这一格的左上角）
@@ -383,6 +422,7 @@
     setVar('--sprite-w', `${metrics.spriteW}px`);
     setVar('--sprite-h', `${metrics.spriteH}px`);
     setVar('--bubble-bottom', `${Math.round(metrics.spriteH * 0.92)}px`);
+    syncHitTest();
     if (!pet) {
       spriteEl.className = 'sprite orb';
       spriteEl.style.backgroundImage = 'none';

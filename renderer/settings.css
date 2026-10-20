@@ -133,7 +133,7 @@ button {
 }
 
 button.primary {
-  background: var(--link);
+  background: var(--primary);
   color: #fff;
   font-weight: 600;
 }

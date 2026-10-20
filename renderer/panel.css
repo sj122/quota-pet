@@ -10,7 +10,7 @@ body {
 }
 
 body {
-  padding: 14px;
+  padding: 20px; /* 给卡片投影留的透明边距，和 main.js 的 PANEL_MARGIN 一致 */
   box-sizing: border-box;
 }
 

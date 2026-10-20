@@ -1,40 +1,45 @@
 <div align="center">
 
-<img src="assets/icon.png" width="88" alt="QuotaPet 图标" />
+<img src="docs/cat.png" width="96" alt="香蕉猫桌宠" />
 
 # 额度桌宠 QuotaPet
 
-一只住在桌面角落的“额度宠物”：**点一下**，Codex / Claude 的 5 小时与每周额度、DeepSeek 的余额与消费一目了然。
+**支持 Codex 官方宠物格式的 Windows 额度桌宠。**
+
+让你在 Codex 里养的猫，顺手帮你盯着额度。点一下，查看 Codex / Claude 订阅用量，以及 DeepSeek 余额与消费趋势。
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows&logoColor=white)
+![Codex Pets](https://img.shields.io/badge/Codex%20Pets-v1%20%2F%20v2-F1C75B)
 ![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-<img src="docs/preview.png" alt="额度面板（浅色 / 深色主题）" width="860" />
+<img src="docs/preview.png" alt="香蕉猫额度桌宠与浅色、深色额度面板" width="1040" />
 
 </div>
 
-## 功能一览
+## 能看什么
 
-仿照 Codex 桌面端的桌宠做的。平时安静待在桌面角落，点一下弹出额度面板：
-
-| 服务 | 能看到什么 |
+| 服务 | 显示内容 |
 |---|---|
-| **Codex** | 5 小时额度、每周额度（剩余百分比、几点重置）、套餐、可用的“额度重置卡” |
-| **Claude** | 5 小时额度、每周额度（登录过 Claude Code 时还有 Opus / Sonnet 周额度和精确重置时间） |
-| **DeepSeek** | 账户余额（充值 / 赠金明细）、今日消费、本月消费、近 7 天消费柱状图 |
+| **Codex** | 5 小时与每周额度、剩余百分比、重置时间、套餐、可用额度重置卡 |
+| **Claude** | 5 小时与每周额度；使用 Claude Code 登录凭据时，可显示接口返回的 Opus / Sonnet 周额度和精确重置时间 |
+| **DeepSeek** | 账户余额、充值与赠金明细、今日 / 本月消费估算、近 7 天消费趋势 |
 
-宠物直接用你在 Codex 里的自定义宠物（`~/.codex/pets`），动画帧表、拖动时的奔跑、眼睛跟着鼠标转，都和 Codex 桌宠一致。界面跟随系统浅色 / 深色主题。
+- **复用 Codex 宠物**：直接读取本机已安装的 Codex 自定义宠物，兼容官方 v1 / v2 精灵图格式，支持透明 PNG / WebP。
+- **Codex 令牌直查**：优先使用本机登录令牌查询，正常刷新不启动 `codex.exe`，无需额外填写 OpenAI API Key。
+- **桌面交互**：单击查看额度、拖动移动位置、悬停显示摘要；透明区域可穿透鼠标，v2 宠物支持眼睛跟随鼠标。
+- **用量提醒**：订阅额度或余额低于设定值时，猫猫会做出提醒动作并弹出气泡。
+- **日常使用**：支持浅色 / 深色 / 跟随系统、托盘菜单、宠物大小调整和开机自启。
 
 <div align="center">
-<img src="docs/states.png" alt="宠物的几种状态" width="760" />
+<img src="docs/states.png" alt="香蕉猫的待机、拖动奔跑、鼠标跟随和额度提醒状态" width="1040" />
 </div>
 
-> 截图里的宠物是演示用的示例素材，额度数据来自 `test/demo-data.js` 里的演示数据。
+> 截图使用本机的香蕉猫 `banana-cat`，额度与余额来自 `test/demo-data.js` 的演示数据。猫猫只是展示示例，你可以换成自己的 Codex 宠物。
 
 ## 快速开始
 
-需要 **Windows 10 / 11** 和 **Node.js 22+**。
+需要 **Windows 10 / 11** 和 **Node.js 22.12+**。
 
 ```bash
 git clone https://github.com/sj122/quota-pet.git
@@ -43,82 +48,117 @@ npm install
 npm start
 ```
 
-第一次启动时，宠物会出现在屏幕右下角，任务栏托盘里也会多一个图标。
+启动后，宠物会出现在桌面右下角，托盘里也会多一个图标。
 
-> - 国内网络下载 Electron 较慢时，可以先设置镜像再安装：`$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"`（PowerShell）。
-> - 如果 `npm install` 之后 `node_modules/electron/dist` 里没有 `electron.exe`（启动时提示找不到 Electron），手动运行一次 `node node_modules/electron/install.js` 即可。
+1. **Codex**：在本机用 ChatGPT 订阅账号登录过 Codex 后，桌宠会自动读取可用登录凭据。
+2. **Claude**：用 `claude` 登录过 Claude Code 时优先查询用量接口；也可以使用 Claude 桌面端已有的用量记录。
+3. **DeepSeek**：右键宠物 → **设置…**，填入 DeepSeek API Key，点“保存并验证”。Windows 加密可用时，Key 通过 DPAPI 加密保存在本机。
+4. **换宠物**：右键宠物 → **切换宠物**，选择本机已有的 Codex 自定义宠物。
 
-1. **右键宠物 → 设置…**，填入 DeepSeek API Key，点“保存并验证”。Key 会用 Windows 加密存储（DPAPI）保存在本机。
-2. 想要桌面快捷方式就运行 `npm run shortcut`。
-3. 想要开机自动启动：**右键宠物 → 开机自动启动**。
+只使用其中一家也可以，在设置里关闭暂时不用的服务即可。桌面快捷方式可通过 `npm run shortcut` 创建；开机自启在右键菜单里开启。
 
-Codex 和 Claude 不需要额外配置：本机登录过 Codex、Claude Code 或 Claude 桌面端，桌宠就能读到额度。
+<details>
+<summary>Electron 下载或启动遇到问题</summary>
 
-## 操作
+国内网络下载较慢时，可以先在 PowerShell 设置镜像，再运行 `npm install`：
+
+```powershell
+$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
+npm install
+```
+
+如果安装后提示找不到 Electron，手动运行 `node node_modules/electron/install.js`，再执行 `npm start`。
+
+</details>
+
+## 支持 Codex 官方宠物格式
+
+QuotaPet 兼容 Codex 桌面端自定义宠物使用的 `pet.json` 与精灵图目录格式。已安装在本机的自定义宠物可以直接复用，无需重新制作动画或转换图片。
+
+默认扫描两个位置；设置了 `CODEX_HOME` 时，第一个位置改为该目录下的 `pets`：
+
+```text
+~/.codex/pets/<宠物目录>/
+%APPDATA%/quota-pet/pets/<宠物目录>/
+```
+
+每只宠物至少包含：
+
+```text
+my-cat/
+├── pet.json
+└── spritesheet.webp   # 也可以使用 PNG，在 pet.json 中填写实际文件名
+```
+
+`pet.json` 示例：
+
+```json
+{
+  "id": "my-cat",
+  "displayName": "我的猫猫",
+  "spritesheetPath": "spritesheet.webp",
+  "spriteVersionNumber": 2
+}
+```
+
+| 格式 | 精灵图尺寸 | 动画支持 |
+|---|---|---|
+| **v1** | 1536 × 1872，8 列 × 9 行 | 待机、奔跑、挥手、跳跃、失败、等待、忙碌、完成等基础状态 |
+| **v2** | 1536 × 2288，8 列 × 11 行 | 基础状态，以及 16 个方向的看向帧，可跟随鼠标 |
+
+标准单帧尺寸为 **192 × 208**。图片使用透明背景的 PNG 或 WebP，文件名与 `spritesheetPath` 保持一致。
+
+新安装宠物后，在右键菜单中选择 **切换宠物 → 重新扫描宠物**。没有找到可用素材时，会显示一个备用小圆球。Codex 自定义宠物的创建方式可参考 [OpenAI 官方宠物说明](https://learn.chatgpt.com/docs/pets)。
+
+## 怎么操作
 
 | 操作 | 效果 |
 |---|---|
-| 左键单击宠物 | 打开或收起额度面板 |
-| 鼠标停在宠物身上 | 宠物跳一下，弹出一行额度摘要 |
-| 按住拖动 | 移动宠物，宠物会朝拖动方向跑 |
-| 右键宠物或托盘图标 | 菜单：刷新、切换宠物、大小、眼睛跟随、设置、开机自启、隐藏、退出 |
-| 面板里按 `Esc` / `F5` | 收起面板 / 立即刷新 |
+| 单击宠物 | 打开或收起额度面板 |
+| 鼠标悬停 | 显示额度摘要 |
+| 按住拖动 | 移动宠物，播放奔跑动画 |
+| 右键宠物或托盘 | 刷新、换宠物、调整大小、设置、开机自启、隐藏或退出 |
+| 面板内按 `Esc` / `F5` | 收起面板 / 立即刷新 |
 
-宠物的透明区域不挡鼠标，点下去会直接点到后面的窗口。
+默认每 **5 分钟**刷新一次，可在设置里调整。打开面板时，如果数据超过 1 分钟未更新，也会触发刷新。默认提醒线为订阅额度剩余 **10%**、DeepSeek 余额 **¥10**。
 
-额度低于提醒线（默认剩余 10%），或者 DeepSeek 余额低于提醒线（默认 ¥10）时，宠物会做出“失败”动作，并冒一个黄色气泡提醒你。
+## 数据来源与边界
 
-## 数据从哪来
-
-| 服务 | 来源 | 说明 |
+| 服务 | 查询方式 | 说明 |
 |---|---|---|
-| Codex | 本机 Codex 自带的 `codex app-server`，调用 `account/rateLimits/read` | 和 Codex 里 `/status` 看到的是同一份数据；令牌刷新、代理都由 codex 自己处理。找不到 codex 时，改用 `~/.codex/auth.json` 直连官方接口（只读，不刷新令牌）。 |
-| Claude | ① `~/.claude/.credentials.json`（终端里用 `claude` 登录过 Claude Code 才有）→ 官方用量接口<br>② Claude 桌面端自己记录的 `%APPDATA%\Claude\plan-usage-history.json` | ①能拿到精确值和精确重置时间。②桌面端每隔几分钟记录一次 5 小时 / 每周用量百分比，但没有重置时间，桌宠根据记录推算“预计几点重置”。 |
-| DeepSeek | 官方 `GET https://api.deepseek.com/user/balance` | 官方 API 只提供余额。“今日 / 本月消费”是桌宠定时记下余额，按余额下降量推算的，从第一次查询开始累计；充值不会被算成消费。 |
+| **Codex** | 优先读取 `~/.codex/auth.json` 中的 ChatGPT 登录令牌，直接查询 Codex 后台用量接口 | 正常刷新不需要打开 Codex 桌面端。令牌缺失、失效或直连失败时，才启动一次 `codex app-server`，通过 `account/rateLimits/read` 备用查询，查询完退出。 |
+| **Claude** | 优先使用 `~/.claude/.credentials.json` 查询用量接口；否则读取 Claude 桌面端的 `plan-usage-history.json` | 直查可获取接口提供的精确重置时间；桌面端记录受其采样频率限制，重置时间为估算，手动刷新无法让采样更快。 |
+| **DeepSeek** | 官方 `GET /user/balance` | API 提供余额；今日 / 本月消费根据本地余额下降量估算，从首次查询开始累计，余额上涨记为充值。 |
 
-默认每 5 分钟刷新一次。打开面板时，如果数据超过 1 分钟没更新，也会刷新一次。
+Codex 订阅登录令牌与 OpenAI API Key 是两种凭据。Codex 直连地址属于其后台接口，未作为稳定的公开 HTTP API 文档化，因此保留官方 app-server 备用查询。
 
-## 隐私
+## 本地存储
 
-- 只请求各家的官方接口，不经过任何第三方服务。网络请求默认跟随系统代理，也可以在设置里单独指定代理。
-- 不会刷新或改写 Codex、Claude 的登录令牌，不会把你从这两个应用里挤下线。
-- 所有配置和历史记录都只保存在本机 `%APPDATA%\quota-pet\`。DeepSeek Key 只以加密形式存在 `config.json` 里，余额历史里只记 Key 的哈希，用来区分不同账号。
-
-## 自定义宠物
-
-桌宠会扫描 `~/.codex/pets/*/pet.json` 和 `%APPDATA%\quota-pet\pets/*/pet.json`。精灵图规格与 Codex 相同：
-
-- 8 列 × 9 行（v1）或 8 列 × 11 行（v2），每格 192×208
-- 行 0 待机、1 向右跑、2 向左跑、3 挥手、4 跳、5 失败、6 等待、7 忙碌、8 完成
-- v2 的第 9、10 行是 16 个方向的“看向”帧，用来实现眼睛跟着鼠标转
-
-在 Codex 里新做的自定义宠物，在桌宠菜单里点“切换宠物 → 重新扫描宠物”就能用上。一只宠物都没找到时，会先用一颗会呼吸的小圆球顶上。
+- 查询请求只发往对应服务，不上传到本项目自建服务器。网络默认跟随系统代理，也可以手动指定代理。
+- 桌宠只读 Codex、Claude 的登录缓存，不自行刷新或改写令牌；Codex 备用查询时，官方 app-server 按自身机制处理续期。
+- 配置与用量历史保存在 `%APPDATA%/quota-pet/`。DeepSeek Key 在 Windows 加密可用时以加密形式存储；余额历史只记录 Key 的哈希，用于区分账号。
 
 ## 开发
 
-| 命令 | 作用 |
+| 命令 | 用途 |
 |---|---|
-| `npm test` | 单元测试（数据规整、重置时间推算、消费统计、动画表） |
-| `npm run selftest` | 在真实环境下把三家数据各读一遍，结果以 JSON 打印 |
-| `npx electron . --snapshot=<目录>` | 用合成鼠标事件走一遍悬停、穿透、拖动、点击，并把各窗口截图存到目录里 |
-| `npx electron . --demo --snapshot=<目录>` | 同上，但使用 `test/demo-data.js` 里的演示数据 |
+| `npm test` | 测试令牌查询与备用通路、数据解析、消费统计、动画和鼠标交互 |
+| `npm run selftest` | 使用本机登录状态查询真实数据，并输出自检结果 |
+| `npx electron . --demo --snapshot=<目录>` | 使用演示数据测试交互，保存宠物、面板和设置截图 |
+| `npx electron . --snapshot=<目录>` | 使用本机真实数据测试交互并截图 |
 
-```
-main.js               主进程：窗口、托盘、菜单、IPC、刷新调度
-preload.js            暴露给页面的最小 API
-src/providers/*.js    Codex / Claude / DeepSeek 数据源
-src/quota.js          三家刷新的统一调度
-src/pets.js           扫描宠物、读取精灵图尺寸
-renderer/pet.*        宠物窗口（动画、命中测试、拖动、气泡）
-renderer/panel.*      额度面板
-renderer/settings.*   设置窗口
-renderer/shared.js    主进程和页面共用的动画表、格式化与告警规则
+```text
+main.js               窗口、托盘、菜单、IPC 与刷新调度
+preload.js            页面可用的最小接口
+src/providers/        Codex / Claude / DeepSeek 数据源
+src/quota.js          三家服务的刷新与状态管理
+src/pets.js           宠物扫描与精灵图识别
+renderer/             宠物、额度面板与设置界面
+test/                 自动化测试与演示数据
 ```
 
-## 声明
+## 声明与许可
 
-本项目是个人兴趣作品，与 OpenAI、Anthropic、DeepSeek 没有任何关联。各服务的名称和商标归其各自所有者所有。
+本项目为独立个人项目，与 OpenAI、Anthropic、DeepSeek 没有隶属或背书关系。“支持 Codex 官方宠物格式”指素材格式兼容。自定义宠物素材的权利归各自权利人所有。
 
-## 许可证
-
-[MIT](LICENSE)
+代码采用 [MIT](LICENSE) 许可证。

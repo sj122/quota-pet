@@ -1,8 +1,8 @@
 {
   "name": "quota-pet",
   "productName": "QuotaPet",
-  "version": "0.1.0",
-  "description": "仿 Codex 桌宠的额度桌宠：点击查看 Codex / Claude 的 5 小时与每周额度，以及 DeepSeek 余额和消费",
+  "version": "0.1.1",
+  "description": "支持 Codex 官方宠物格式的 Windows 额度桌宠：查看 Codex / Claude 订阅额度、DeepSeek 余额与消费趋势",
   "main": "main.js",
   "private": true,
   "license": "MIT",

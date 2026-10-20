@@ -110,7 +110,7 @@
           <input id="proxy" type="text" placeholder="例如 http://127.0.0.1:7897" spellcheck="false" />
         </div>
         <div class="row stack">
-          <label for="codexPath">codex 程序路径（留空自动查找）</label>
+          <label for="codexPath">备用 codex 程序路径（留空自动查找）</label>
           <input id="codexPath" type="text" spellcheck="false" />
         </div>
       </section>
@@ -118,7 +118,7 @@
       <details class="group about">
         <summary>数据从哪来？</summary>
         <ul>
-          <li><b>Codex</b>：调用本机 Codex 自带的 <code>codex app-server</code> 读取 <code>account/rateLimits/read</code>，和 Codex 里 /status 看到的是同一份数据；不可用时改用 <code>~/.codex/auth.json</code> 直连官方接口（只读，不刷新令牌）。</li>
+          <li><b>Codex</b>：优先读取 <code>~/.codex/auth.json</code> 中的登录令牌，直接查询后台用量接口；正常刷新不启动 codex 程序。令牌缺失、失效或直连失败时，才通过 <code>codex app-server</code> 备用查询，由 Codex 自身处理续期。</li>
           <li><b>Claude</b>：如果在终端用 <code>claude</code> 登录过 Claude Code，就读取官方用量接口，能拿到精确的重置时间；否则读取 Claude 桌面端自己记录的 <code>plan-usage-history.json</code>，重置时间是推算的。</li>
           <li><b>DeepSeek</b>：官方 <code>/user/balance</code> 接口只提供余额，“今日 / 本月消费”是桌宠根据余额变化在本地推算的，从第一次查询开始累计。</li>
         </ul>
