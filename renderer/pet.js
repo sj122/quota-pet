@@ -291,8 +291,21 @@
     if (pressed && (e.buttons & 1) === 0) release(null, true);
     onPointer(e.clientX, e.clientY);
   });
-  api.onCursor(({ x, y }) => {
-    if (!pressed) onPointer(x, y);
+  // 主进程给的是窗口像素坐标和窗口尺寸，按视口比例换成 CSS 像素，页面缩放后也能对准宠物。
+  api.onCursor(({ x, y, w, h }) => {
+    if (pressed) return;
+    onPointer(w ? (x * window.innerWidth) / w : x, h ? (y * window.innerHeight) / h : y);
+  });
+  api.onInteractionReset(() => {
+    // 锁屏不保证触发 blur，必须显式释放捕获并丢掉旧坐标，避免卡在按住/悬停状态。
+    lastPointer = null;
+    release(null, true);
+    endHover();
+    stopLook();
+    hideBubble();
+    interactive = null; // 强制同步原生状态，即使鼠标仍停在锁屏前同一个位置。
+    setInteractive(false);
+    lastActivity = Date.now();
   });
 
   // ---------- 额度变化 → 宠物反应 ----------

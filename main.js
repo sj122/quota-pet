@@ -67,12 +67,16 @@ let pets = [];
 let currentPet = null;
 let trayIconImage = null;
 let petIconDataUrl = null;
-let panelHiddenAt = 0;
+let panelHiddenAt = -Infinity;
 let panelHeight = 460;
 let dragOrigin = null;
 let dragMoved = false;
 let refreshTimer = null;
 let cursorTimer = null;
+let screenLocked = false;
+let systemSuspended = false;
+let petRefitTimer = null;
+let resumeRefreshTimer = null;
 
 const userFile = (name) => path.join(app.getPath('userData'), name);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -179,6 +183,12 @@ function defaultAnchor(m) {
   return { cx: wa.x + wa.width - m.width / 2 - 36, bottom: wa.y + wa.height };
 }
 
+// 优先回到保存的位置；那块屏不在了就沿用当前位置，都不在屏幕上再放回主屏右下角。
+function petAnchor(m) {
+  const current = petWin && !petWin.isDestroyed() ? anchorFromBounds(petWin.getBounds()) : null;
+  return [config.get().position, current].find(anchorVisible) || defaultAnchor(m);
+}
+
 // ---------- 窗口 ----------
 
 function webPrefs(extra = {}) {
@@ -199,10 +209,8 @@ const broadcast = (channel, payload) => [petWin, panelWin, settingsWin].forEach(
 
 function createPetWindow() {
   const m = petMetrics();
-  let anchor = config.get().position;
-  if (!anchorVisible(anchor)) anchor = defaultAnchor(m);
   petWin = new BrowserWindow({
-    ...boundsFromAnchor(anchor, m),
+    ...boundsFromAnchor(petAnchor(m), m),
     show: false,
     frame: false,
     transparent: true,
@@ -223,6 +231,10 @@ function createPetWindow() {
   // 透明区域鼠标穿透；渲染进程发现鼠标落在宠物不透明像素上时再关掉穿透
   petWin.setIgnoreMouseEvents(true, { forward: true });
   petWin.loadURL('qp://app/renderer/pet.html');
+  // 缩放按源（qp://app）共享并会记进配置。旧版的默认菜单能用 Ctrl+加号 放大面板，宠物也被一起放大，
+  // 页面坐标就和窗口对不上了；每次加载都恢复 100%。
+  const wc = petWin.webContents;
+  wc.on('did-finish-load', () => wc.setZoomLevel(0));
   petWin.once('ready-to-show', () => {
     if (!config.get().petHidden) petWin.showInactive();
   });
@@ -302,15 +314,16 @@ function showPanel() {
 
 function hidePanel() {
   if (!panelWin || panelWin.isDestroyed() || !panelWin.isVisible()) return;
-  panelHiddenAt = Date.now();
+  panelHiddenAt = performance.now();
   panelWin.hide();
   sendTo(petWin, 'panel:visible', false);
 }
 
 function togglePanel() {
   if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) return hidePanel();
-  // 点宠物时面板可能先因失焦被收起，这里避免紧接着又弹出来
-  if (Date.now() - panelHiddenAt < 300) return;
+  // 点宠物时面板可能先因失焦被收起，这里避免紧接着又弹出来。
+  // 用单调时钟：系统校时把时间往回拨时，Date.now() 会让这里长时间以为“刚收起”。
+  if (performance.now() - panelHiddenAt < 300) return;
   showPanel();
 }
 
@@ -551,22 +564,99 @@ function watchClaudeDesktop() {
   });
 }
 
+// 鼠标相对宠物窗口的位置连同窗口尺寸一起给页面，由页面按视口比例换成 CSS 像素：
+// 页面被缩放、或缩放比例没跟上显示器时，窗口像素和 CSS 像素并不是 1:1。
+// Windows 上先换成物理像素：几块屏缩放不同时，DIP 坐标跨屏不连续。
+function cursorInPet() {
+  const p = screen.getCursorScreenPoint();
+  const b = petWin.getBounds();
+  if (process.platform !== 'win32') return { x: p.x - b.x, y: p.y - b.y, w: b.width, h: b.height };
+  const pp = screen.dipToScreenPoint(p);
+  const pb = screen.dipToScreenRect(petWin, b);
+  return { x: pp.x - pb.x, y: pp.y - pb.y, w: pb.width, h: pb.height };
+}
+
 // 渲染进程拿不到窗口外的鼠标位置，由主进程轮询后转发（用于眼睛跟随和穿透判断）
 function startCursorPolling() {
   let last = '';
   let lastSentAt = 0;
   cursorTimer = setInterval(() => {
-    if (!petWin || petWin.isDestroyed() || !petWin.isVisible()) return;
-    const p = screen.getCursorScreenPoint();
-    const b = petWin.getBounds();
-    const key = `${p.x},${p.y},${b.x},${b.y}`;
-    const now = Date.now();
+    if (screenLocked || systemSuspended || !petWin || petWin.isDestroyed() || !petWin.isVisible()) return;
+    const c = cursorInPet();
+    const key = `${c.x},${c.y},${c.w},${c.h}`;
+    const now = performance.now();
     // 静止时也定期校准，避免窗口隐藏/恢复或重载后沿用旧的穿透状态。
     if (key === last && now - lastSentAt < 1000) return;
     last = key;
     lastSentAt = now;
-    petWin.webContents.send('pet:cursor', { x: p.x - b.x, y: p.y - b.y });
+    petWin.webContents.send('pet:cursor', c);
   }, 50);
+}
+
+function endPetDrag() {
+  if (dragOrigin && dragMoved && petWin && !petWin.isDestroyed()) {
+    logUi({ ev: 'drag', dx: petWin.getBounds().x - dragOrigin.x, dy: petWin.getBounds().y - dragOrigin.y });
+    if (!SNAPSHOT_DIR) config.set({ position: anchorFromBounds(petWin.getBounds()) });
+  }
+  dragOrigin = null;
+  dragMoved = false;
+}
+
+function resetPetInteraction() {
+  endPetDrag();
+  if (!petWin || petWin.isDestroyed()) return;
+  // 锁屏会切换 Windows 桌面，非聚焦窗口未必收到 blur/pointerup。
+  // 同时清掉页面缓存、捕获和原生穿透转发；仅重发鼠标坐标会被页面的状态去重跳过。
+  petWin.setIgnoreMouseEvents(false);
+  petWin.setIgnoreMouseEvents(true, { forward: true });
+  sendTo(petWin, 'pet:interaction-reset');
+}
+
+function restorePetInteraction() {
+  if (screenLocked || systemSuspended || !petWin || petWin.isDestroyed()) return;
+  resetPetInteraction();
+  const m = petMetrics();
+  petWin.setBounds(boundsFromAnchor(petAnchor(m), m));
+  petWin.webContents.setZoomLevel(0);
+  petWin.setAlwaysOnTop(true, 'screen-saver');
+  if (!config.get().petHidden && !petWin.isVisible()) petWin.showInactive();
+  placePanel();
+  // 不等鼠标移动或轮询去重超时，立即让页面按当前位置重新命中测试。
+  sendTo(petWin, 'pet:cursor', cursorInPet());
+}
+
+// 显示器唤醒、插拔或改缩放后，再等布局稳定校准一次；用户已开始新的拖动时不打断它。
+function schedulePetRefit() {
+  clearTimeout(petRefitTimer);
+  petRefitTimer = setTimeout(() => {
+    petRefitTimer = null;
+    if (!dragOrigin) restorePetInteraction();
+  }, 1500);
+}
+
+function watchDisplays() {
+  for (const name of ['display-added', 'display-removed', 'display-metrics-changed']) screen.on(name, schedulePetRefit);
+}
+
+function watchPowerEvents() {
+  const deactivate = () => {
+    clearTimeout(petRefitTimer);
+    clearTimeout(resumeRefreshTimer);
+    hidePanel();
+    resetPetInteraction();
+  };
+  const reactivate = () => {
+    if (screenLocked || systemSuspended) return;
+    panelHiddenAt = -Infinity;
+    restorePetInteraction();
+    schedulePetRefit();
+    clearTimeout(resumeRefreshTimer);
+    resumeRefreshTimer = setTimeout(() => quota.refresh(), 5000);
+  };
+  powerMonitor.on('lock-screen', () => { screenLocked = true; deactivate(); });
+  powerMonitor.on('suspend', () => { systemSuspended = true; deactivate(); });
+  powerMonitor.on('unlock-screen', () => { screenLocked = false; reactivate(); });
+  powerMonitor.on('resume', () => { systemSuspended = false; reactivate(); });
 }
 
 function onQuotaUpdate(snap) {
@@ -644,11 +734,11 @@ function registerIpc() {
 
   ipcMain.on('pet:ignore-mouse', (e, ignore) => {
     if (!trusted(e) || !petWin) return;
-    petWin.setIgnoreMouseEvents(Boolean(ignore), { forward: true });
+    petWin.setIgnoreMouseEvents(screenLocked || systemSuspended || Boolean(ignore), { forward: true });
     logUi({ ev: 'ignore', value: Boolean(ignore) });
   });
   ipcMain.on('pet:drag-start', (e) => {
-    if (!trusted(e) || !petWin) return;
+    if (!trusted(e) || !petWin || screenLocked || systemSuspended) return;
     dragOrigin = petWin.getBounds();
     dragMoved = false;
   });
@@ -668,15 +758,10 @@ function registerIpc() {
   });
   ipcMain.on('pet:drag-end', (e) => {
     if (!trusted(e) || !petWin) return;
-    if (dragMoved) {
-      logUi({ ev: 'drag', dx: petWin.getBounds().x - dragOrigin.x, dy: petWin.getBounds().y - dragOrigin.y });
-      if (!SNAPSHOT_DIR) config.set({ position: anchorFromBounds(petWin.getBounds()) });
-    }
-    dragOrigin = null;
-    dragMoved = false;
+    endPetDrag();
   });
   ipcMain.on('pet:click', (e) => {
-    if (!trusted(e)) return;
+    if (!trusted(e) || screenLocked || systemSuspended) return;
     logUi({ ev: 'click' });
     togglePanel();
   });
@@ -764,6 +849,71 @@ async function capture(win, file) {
   if (!win || win.isDestroyed()) return;
   const img = await win.webContents.capturePage();
   fs.writeFileSync(file, img.toPNG());
+}
+
+// 在真实窗口中模拟系统通知，不实际锁定用户电脑，也不移动系统鼠标。
+async function checkSessionRecovery() {
+  const assert = require('node:assert/strict');
+  const results = [];
+  const wc = petWin.webContents;
+  const scenarios = [
+    ['lock-screen', 'unlock-screen'],
+    ['suspend', 'resume'],
+    ['lock-screen', 'suspend', 'resume', 'unlock-screen'],
+    ['lock-screen', 'suspend', 'unlock-screen', 'resume'],
+  ];
+  const input = (type, x, y, down = false) => {
+    const b = petWin.getBounds();
+    wc.sendInputEvent({
+      type, x, y, globalX: b.x + x, globalY: b.y + y,
+      button: 'left', clickCount: 1, modifiers: down ? ['leftButtonDown'] : [],
+    });
+  };
+  for (const events of scenarios) {
+    hidePanel();
+    uiLog.length = 0;
+    const b = petWin.getBounds();
+    const x = Math.round(b.width / 2);
+    const y = Math.round(b.height - petMetrics().spriteH * 0.45);
+    sendTo(petWin, 'pet:cursor', { x, y });
+    await sleep(60);
+    // 故意不发 mouseUp，覆盖切换桌面时丢失松手事件的情况。
+    input('mouseDown', x, y);
+    input('mouseMove', x + 20, y, true);
+    await sleep(60);
+    for (const name of events) {
+      powerMonitor.emit(name);
+      await sleep(60);
+    }
+    await sleep(1650); // 同时覆盖显示器布局稳定后的二次校准。
+    assert.equal(dragOrigin, null, 'session recovery must clear the main-process drag');
+    assert.equal(uiLog.some((e) => e.ev === 'click'), false, 'cancelled press must not open the panel');
+    input('mouseUp', x, y); // 清理 Chromium 的合成按钮状态。
+    await sleep(60);
+    assert.equal(panelWin.isVisible(), false, 'late mouseUp must not open the panel');
+    sendTo(petWin, 'pet:cursor', { x, y });
+    await sleep(60);
+    const before = petWin.getBounds();
+    input('mouseDown', x, y);
+    input('mouseMove', x - 24, y, true);
+    await sleep(80);
+    input('mouseUp', x, y);
+    await sleep(80);
+    const dx = petWin.getBounds().x - before.x;
+    assert.equal(dx, -24, 'dragging must work after session recovery');
+    input('mouseDown', x, y);
+    input('mouseUp', x, y);
+    await sleep(160);
+    assert.equal(panelWin.isVisible(), true, 'click must open the quota panel after session recovery');
+    results.push({ events, dragDx: dx, panelVisibleAfterClick: true });
+  }
+  setPetHidden(true);
+  powerMonitor.emit('lock-screen');
+  powerMonitor.emit('unlock-screen');
+  await sleep(1650);
+  assert.equal(petWin.isVisible(), false, 'session recovery must respect the hidden-pet setting');
+  setPetHidden(false);
+  return { scenarios: results, hiddenPetStayedHidden: true };
 }
 
 // 用合成事件走一遍交互（不碰真实鼠标）：悬停 → 穿透 → 看向 → 拖动 → 点击开面板
@@ -855,6 +1005,7 @@ async function runSnapshot(dir) {
   await capture(settingsWin, path.join(dir, 'settings-light.png'));
   updateConfig({ theme: themeBefore });
   report.themeRestoredTo = config.get().theme;
+  report.sessionRecovery = await checkSessionRecovery();
   fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2));
   app.exit(0);
 }
@@ -876,15 +1027,22 @@ async function start() {
   if (SELFTEST) return runSelftest();
 
   registerIpc();
+  // 不要 Electron 的默认菜单：它带着 Ctrl+加号/减号 缩放、Ctrl+R 重载、Ctrl+W 关窗等快捷键，
+  // 面板有焦点时一按就会作用到我们的窗口上。
+  Menu.setApplicationMenu(null);
   createPetWindow();
   createPanelWindow();
   createTray();
   if (!SNAPSHOT_DIR) startCursorPolling();
+  watchDisplays();
+  watchPowerEvents();
   scheduleRefresh();
   watchClaudeDesktop();
-  powerMonitor.on('resume', () => setTimeout(() => quota.refresh(), 5000));
   setTimeout(() => quota.refresh(), 800);
-  if (SNAPSHOT_DIR) runSnapshot(SNAPSHOT_DIR);
+  if (SNAPSHOT_DIR) runSnapshot(SNAPSHOT_DIR).catch((err) => {
+    console.error(err);
+    app.exit(1);
+  });
 }
 
 if (SELFTEST || SNAPSHOT_DIR) {
@@ -904,5 +1062,7 @@ app.on('window-all-closed', () => {});
 app.on('before-quit', () => {
   clearInterval(refreshTimer);
   clearInterval(cursorTimer);
+  clearTimeout(petRefitTimer);
+  clearTimeout(resumeRefreshTimer);
   fs.unwatchFile(DESKTOP_HISTORY_FILE);
 });
