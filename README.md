@@ -138,14 +138,19 @@ Codex 订阅登录令牌与 OpenAI API Key 是两种凭据。Codex 直连地址�
 - 桌宠只读 Codex、Claude 的登录缓存，不自行刷新或改写令牌；Codex 备用查询时，官方 app-server 按自身机制处理续期。
 - 配置与用量历史保存在 `%APPDATA%/quota-pet/`。DeepSeek Key 在 Windows 加密可用时以加密形式存储；余额历史只记录 Key 的哈希，用于区分账号。
 
+宠物在锁屏、休眠或显示器布局变化后会重新校准窗口和鼠标穿透；页面持续失去响应时会自动重载。如果仍然无法拖动，可在托盘右键选择“恢复宠物交互”。恢复相关事件保存在 `%APPDATA%/quota-pet/interaction.log`（轮转备份为 `interaction.log.1`），用于对照锁屏、唤醒、分辨率变化和页面异常的时间；日志不包含令牌、额度或鼠标移动轨迹。
+
 ## 开发
 
 | 命令 | 用途 |
 |---|---|
 | `npm test` | 测试令牌查询与备用通路、数据解析、消费统计、动画和鼠标交互 |
+| `npm run test:interaction` | 在真实 Electron 演示窗口验证系统通知、虚拟显示布局变化和页面卡死/崩溃后的拖动与点击，结果写入 `out/interaction-test/report.json` |
 | `npm run selftest` | 使用本机登录状态查询真实数据，并输出自检结果 |
 | `npx electron . --demo --snapshot=<目录>` | 使用演示数据测试交互，保存宠物、面板和设置截图 |
 | `npx electron . --snapshot=<目录>` | 使用本机真实数据测试交互并截图 |
+
+交互演示测试使用输出目录下的独立配置，不修改用户的主题、位置或隐藏设置；虚拟布局测试不会改变 Windows 实际分辨率。真实锁屏、休眠和远程控制切换仍需在日常使用中确认。
 
 ```text
 main.js               窗口、托盘、菜单、IPC 与刷新调度

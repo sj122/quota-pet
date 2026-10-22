@@ -10,8 +10,9 @@ const QP = require('../renderer/shared');
 // Run the actual renderer with controlled animation timers and sprite alpha pixels.
 async function createPet({ opaque = () => true, captureThrows = false, spriteRect, viewport = {} } = {}) {
   const timers = new Map();
+  const intervals = new Map();
   const subscriptions = {};
-  const calls = { starts: 0, ends: 0, clicks: 0, moves: [], released: [], ignores: [] };
+  const calls = { starts: 0, ends: 0, clicks: 0, heartbeats: 0, moves: [], released: [], ignores: [] };
   let timerId = 0;
   let ignoring = true; // Initial native BrowserWindow state.
   function element(rect) {
@@ -52,6 +53,7 @@ async function createPet({ opaque = () => true, captureThrows = false, spriteRec
     getState: async () => ({ pet, metrics: { spriteW: 120, spriteH: 125 }, config: {}, quota: {} }),
     setIgnoreMouse: (ignore) => { ignoring = ignore; calls.ignores.push(ignore); },
     setPetIcon() {},
+    interactionHeartbeat: () => calls.heartbeats++,
     dragStart: () => calls.starts++, dragEnd: () => calls.ends++,
     dragMove: (dx, dy) => calls.moves.push([dx, dy]), petClick: () => calls.clicks++, petMenu() {},
     ...Object.fromEntries(['Quota', 'Config', 'Pet', 'Cursor', 'InteractionReset', 'PanelVisible', 'Debug']
@@ -69,7 +71,7 @@ async function createPet({ opaque = () => true, captureThrows = false, spriteRec
     },
     Image: class { naturalWidth = 1536; naturalHeight = 2288; async decode() {} },
     setTimeout: (cb, delay) => { timers.set(++timerId, { cb, delay }); return timerId; },
-    clearTimeout: (id) => timers.delete(id), setInterval() {},
+    clearTimeout: (id) => timers.delete(id), setInterval: (cb, delay) => intervals.set(delay, cb),
     requestAnimationFrame: (cb) => { cb(); },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/pet.js'), 'utf8'), context);
@@ -77,6 +79,8 @@ async function createPet({ opaque = () => true, captureThrows = false, spriteRec
   return {
     sprite, bubble, window, calls, subscriptions,
     get ignoring() { return ignoring; },
+    loseNativeHitState(value) { ignoring = value; },
+    runInterval(delay) { intervals.get(delay)(); },
     runTimer(delay) {
       const entry = [...timers].find(([, t]) => t.delay === delay);
       assert.ok(entry, `Expected an active ${delay}ms timer`);
@@ -96,6 +100,37 @@ test('stationary cursor: newly opaque animation pixels receive clicks', async ()
   assert.equal(pet.ignoring, true);
   pet.runTimer(1680); // Idle frame 0 -> 1, with no mouse movement.
   assert.equal(pet.ignoring, false);
+});
+
+test('native passthrough lost after a desktop switch is repaired at an unchanged cursor', async () => {
+  const pet = await createPet();
+  pet.subscriptions.Cursor({ x: 130, y: 146 });
+  pet.loseNativeHitState(true);
+  pet.subscriptions.Cursor({ x: 130, y: 146, forceHitTest: true });
+  assert.equal(pet.ignoring, false);
+  pet.subscriptions.Cursor({ x: 3, y: 3 });
+  pet.loseNativeHitState(false);
+  pet.subscriptions.Cursor({ x: 3, y: 3, forceHitTest: true });
+  assert.equal(pet.ignoring, true);
+});
+
+test('native passthrough calibration preserves an active captured drag', async () => {
+  const pet = await createPet();
+  pet.subscriptions.Cursor({ x: 130, y: 146 });
+  pet.sprite.dispatch('pointerdown', pointer());
+  pet.loseNativeHitState(true);
+  pet.subscriptions.Cursor({ x: 3, y: 3, forceHitTest: true });
+  assert.equal(pet.ignoring, false);
+  assert.equal(pet.calls.ends, 0);
+  pet.sprite.dispatch('pointermove', pointer({ screenX: 520 }));
+  assert.equal(pet.calls.moves.length, 1);
+});
+
+test('renderer reports liveness even when the mouse is stationary', async () => {
+  const pet = await createPet();
+  pet.runInterval(1000);
+  pet.runInterval(1000);
+  assert.equal(pet.calls.heartbeats, 2);
 });
 
 test('stationary cursor: transparent animation pixels become click-through', async () => {

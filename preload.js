@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('quotaPet', {
   onPet: listen('pet:changed'),
   onCursor: listen('pet:cursor'),
   onInteractionReset: listen('pet:interaction-reset'),
+  interactionHeartbeat: () => ipcRenderer.send('pet:heartbeat'),
   onPanelVisible: listen('panel:visible'),
   onDebug: listen('pet:debug'),
   setIgnoreMouse: (ignore) => ipcRenderer.send('pet:ignore-mouse', ignore),

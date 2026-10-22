@@ -292,8 +292,12 @@
     onPointer(e.clientX, e.clientY);
   });
   // 主进程给的是窗口像素坐标和窗口尺寸，按视口比例换成 CSS 像素，页面缩放后也能对准宠物。
-  api.onCursor(({ x, y, w, h }) => {
-    if (pressed) return;
+  api.onCursor(({ x, y, w, h, forceHitTest }) => {
+    if (forceHitTest) interactive = null;
+    if (pressed) {
+      setInteractive(true);
+      return;
+    }
     onPointer(w ? (x * window.innerWidth) / w : x, h ? (y * window.innerHeight) / h : y);
   });
   api.onInteractionReset(() => {
@@ -463,6 +467,8 @@
     }
   }
 
+  // 独立于鼠标和动画报告页面是否仍能执行 JavaScript。
+  setInterval(() => api.interactionHeartbeat(), 1000);
   // 闲着太久就随机做个小动作
   setInterval(() => {
     if (!cfg.idleSelfPlay || reduced || !pet) return;
