@@ -1,7 +1,7 @@
 {
   "name": "quota-pet",
   "productName": "QuotaPet",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "支持 Codex 官方宠物格式的 Windows 额度桌宠：查看 Codex / Claude 订阅额度、DeepSeek 余额与消费趋势",
   "main": "main.js",
   "private": true,

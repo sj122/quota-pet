@@ -41,9 +41,13 @@ function createMain() {
   const pet = Object.assign(new EventEmitter(), {
     bounds: { x: 1660, y: 832, width: 260, height: 208 }, visible: true,
     ignoring: true, reloads: 0, dead: false, webContents: wc,
+    focusable: false, skipTaskbar: true, focused: false,
     isDestroyed() { return this.dead; }, isVisible() { return this.visible; },
     getBounds() { return { ...this.bounds }; }, setBounds(b) { this.bounds = { ...b }; },
     setIgnoreMouseEvents(value) { this.ignoring = value; }, setAlwaysOnTop() {},
+    setFocusable(value) { this.focusable = value; this.skipTaskbar = !value; },
+    setSkipTaskbar(value) { this.skipTaskbar = value; },
+    focus() { this.focused = true; },
     showInactive() { this.visible = true; }, getTitle: () => 'QuotaPet',
     reload() { this.reloads++; wc.crashed = false; },
   });
@@ -74,7 +78,10 @@ function createMain() {
       get motion() { return motion; }, get quota() { return quota; },
       watchDisplays, watchPowerEvents, watchClockGaps, checkPetHeartbeat, startCursorPolling,
       registerIpc, endPetDrag, schedulePetRefit, restorePetInteraction, reloadOnCrash,
-      get dragging() { return dragOrigin; }, get heartbeat() { return lastPetHeartbeat; }
+      applyPassthrough, cursorInPet, probePetRenderer, checkCursorChannel,
+      get dragging() { return dragOrigin; }, get heartbeat() { return lastPetHeartbeat; },
+      get ignoring() { return passthroughIgnoring; }, get hitMap() { return hitMap; },
+      get over() { return rendererOver; }
     };`, context);
   const api = context.api;
   api.setup(config, pet);
@@ -119,6 +126,14 @@ test('a saved anchor near the edge keeps the complete pet in the work area', () 
   assert.ok(b.y >= 40 && b.y + b.height <= 720);
 });
 
+test('Windows recovery permits click activation without taking focus or adding a taskbar button', () => {
+  const h = createMain();
+  h.api.restorePetInteraction();
+  assert.equal(h.pet.focusable, true, 'a no-activate window can lose mouseDown after remote session changes');
+  assert.equal(h.pet.skipTaskbar, true, 'setFocusable must not expose a pet taskbar button');
+  assert.equal(h.pet.focused, false, 'recovery must leave the user in their active application');
+});
+
 test('a new drag delays the pending display fit without losing it', () => {
   const h = createMain();
   h.api.schedulePetRefit();
@@ -130,16 +145,89 @@ test('a new drag delays the pending display fit without losing it', () => {
   assert.equal(h.pet.bounds.x + h.pet.bounds.width, 1920);
 });
 
+// 当前帧的透明度图：48x52（192/4 x 208/4），只有 (col=5,row=10) 一个不透明像素。
+const hitMapPayload = (overrides = {}) => {
+  const alpha = new Uint8Array(48 * 52);
+  alpha[10 * 48 + 5] = 255;
+  return {
+    cell: { row: 0, col: 0 },
+    cellW: 192, cellH: 208, q: 4, cols: 48, rows: 52, alpha,
+    sprite: { left: 70, top: 84, width: 120, height: 125 },
+    viewport: { w: 260, h: 208 },
+    ...overrides,
+  };
+};
+// 精灵里的不透明像素换算回窗口像素（与页面里 hitPet 的换算方向相反）。
+const windowPointOfOpaquePixel = { x: 70 + (5.5 / 48) * 120, y: 84 + (10.5 / 52) * 125 };
+const windowPointOfTransparentPixel = { x: 70 + (30 / 48) * 120, y: 84 + (40 / 52) * 125 };
+
 test('missing unlock/resume notifications cannot permanently block cursor polling or dragging', () => {
   const h = createMain();
   h.api.watchPowerEvents(); h.api.startCursorPolling();
   h.power.emit('lock-screen'); h.power.emit('suspend');
   h.ipc.emit('pet:drag-start', h.event);
   assert.ok(h.api.dragging);
-  h.ipc.emit('pet:ignore-mouse', h.event, false);
-  assert.equal(h.pet.ignoring, false);
+  assert.equal(h.pet.ignoring, false, 'holding the button must keep the window interactive');
   h.runInterval(50);
   assert.ok(h.wc.sent.some((s) => s.channel === 'pet:cursor'));
+});
+
+test('main process hit tests the uploaded mask, so a wedged page cannot deafen the pet', () => {
+  const h = createMain();
+  h.ipc.emit('pet:hit-map', h.event, hitMapPayload());
+  assert.ok(h.api.hitMap, 'the hit map must be accepted');
+  h.api.applyPassthrough({ ...windowPointOfOpaquePixel, w: 260, h: 208 });
+  assert.equal(h.pet.ignoring, false, 'opaque pixels must catch the mouse');
+  h.api.applyPassthrough({ ...windowPointOfTransparentPixel, w: 260, h: 208 });
+  assert.equal(h.pet.ignoring, true, 'transparent pixels inside the sprite must pass clicks through');
+  h.api.applyPassthrough({ x: 5, y: 5, w: 260, h: 208 });
+  assert.equal(h.pet.ignoring, true);
+});
+
+test('an oversized or malformed hit map is rejected instead of trusted', () => {
+  const h = createMain();
+  h.ipc.emit('pet:hit-map', h.event, hitMapPayload({ alpha: new Uint8Array(4) }));
+  assert.equal(h.api.hitMap, null);
+  h.ipc.emit('pet:hit-map', h.event, hitMapPayload({ cellW: 0 }));
+  assert.equal(h.api.hitMap, null);
+  h.ipc.emit('pet:hit-map', h.event, hitMapPayload());
+  assert.ok(h.api.hitMap);
+});
+
+test('a visible bubble keeps the window interactive above the sprite', () => {
+  const h = createMain();
+  h.ipc.emit('pet:hit-map', h.event, hitMapPayload());
+  h.ipc.emit('pet:hit-bubble', h.event, { left: 0, top: 0, width: 260, height: 60 });
+  h.api.applyPassthrough({ x: 130, y: 30, w: 260, h: 208 });
+  assert.equal(h.pet.ignoring, false);
+  h.ipc.emit('pet:hit-bubble', h.event, null);
+  h.api.applyPassthrough({ x: 130, y: 30, w: 260, h: 208 });
+  assert.equal(h.pet.ignoring, true);
+});
+
+test('cursor channel stalls are detected and trigger a self-heal', () => {
+  const h = createMain(); h.api.startCursorPolling(); h.api.watchClockGaps();
+  h.advance(1000); h.runInterval(1000); // 初始化光标应答时间
+  // 页面还在发心跳，但不再处理鼠标消息；按秒推进，避免走成“系统睡过”的分支。
+  for (let i = 0; i < 15; i++) {
+    h.ipc.emit('pet:heartbeat', h.event);
+    h.advance(1000);
+    h.runInterval(1000);
+  }
+  assert.ok(h.records.some((r) => r.event === 'cursor-channel-stalled'), 'a stalled cursor channel must be logged');
+  assert.ok(h.records.some((r) => r.event === 'reactivate' && r.reason === 'cursor-stall'));
+});
+
+test('recovery probe resolves only when the page answers', async () => {
+  const h = createMain();
+  const pending = h.api.probePetRenderer();
+  const sent = h.wc.sent.filter((s) => s.channel === 'pet:probe').at(-1);
+  assert.ok(sent, 'the probe must be delivered to the page');
+  h.ipc.emit('pet:probe-ack', h.event, sent.payload);
+  assert.equal(await pending, true);
+  const failing = h.api.probePetRenderer(50);
+  h.runTimer(50);
+  assert.equal(await failing, false, 'an unanswered probe must fail');
 });
 
 test('native hit testing is reasserted once per second even during continuous cursor movement', () => {
