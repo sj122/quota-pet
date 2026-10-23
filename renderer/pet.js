@@ -41,6 +41,7 @@
     spriteEl.style.backgroundPosition = `${x}% ${y}%`;
     // 动画也会改变鼠标下的透明像素，不能只等鼠标移动再更新穿透。
     syncHitTest();
+    publishHitMap();
   }
 
   function play(state, opts = {}) {
@@ -123,10 +124,67 @@
     return false;
   }
 
+  // 原生穿透由主进程按透明度图决定；这里只把页面自己的判断报上去，用于诊断和兜底。
   function setInteractive(over) {
     if (over === interactive) return;
     interactive = over;
-    api.setIgnoreMouse(!over);
+    api.setHit(over);
+  }
+
+  // 当前帧哪一块像素不透明，交给主进程去算命中。窗口被缩放、换了显示器时，
+  // 靠这里的 sprite 矩形 + viewport 换算，主进程不用猜页面的布局。
+  let hitMapKey = '';
+  function publishHitMap() {
+    if (!pet) {
+      api.setHitMap(null);
+      return;
+    }
+    const s = spriteEl.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (!pet.cellW || !pet.cellH || !(s.width > 0) || !(s.height > 0) || !(vw > 0) || !(vh > 0)) return;
+    const q = ALPHA_SCALE;
+    const cols = Math.ceil(pet.cellW / q);
+    const rows = Math.ceil(pet.cellH / q);
+    const key = `${frame.row},${frame.col},${Math.round(s.left)},${Math.round(s.top)},${Math.round(s.width)},${Math.round(s.height)},${Math.round(vw)},${Math.round(vh)},${alphaMap ? 1 : 0}`;
+    if (key === hitMapKey) return;
+    hitMapKey = key;
+    let alpha = null;
+    if (alphaMap) {
+      alpha = new Uint8Array(cols * rows);
+      const { data, w, h } = alphaMap;
+      const ox = Math.floor((frame.col * pet.cellW) / q);
+      const oy = Math.floor((frame.row * pet.cellH) / q);
+      for (let y = 0; y < rows; y++) {
+        const sy = oy + y;
+        if (sy < 0 || sy >= h) continue;
+        for (let x = 0; x < cols; x++) {
+          const sx = ox + x;
+          if (sx >= 0 && sx < w) alpha[y * cols + x] = data[sy * w + sx];
+        }
+      }
+    }
+    api.setHitMap({
+      cell: { row: frame.row, col: frame.col },
+      cellW: pet.cellW,
+      cellH: pet.cellH,
+      q,
+      cols,
+      rows,
+      alpha,
+      sprite: { left: s.left, top: s.top, width: s.width, height: s.height },
+      viewport: { w: vw, h: vh },
+    });
+  }
+
+  // 气泡也在窗口里，鼠标移上去同样得接住。
+  function publishBubble() {
+    if (!bubbleEl || !bubbleVisible()) {
+      api.setHitBubble(null);
+      return;
+    }
+    const r = bubbleEl.getBoundingClientRect();
+    api.setHitBubble({ left: r.left, top: r.top, width: r.width, height: r.height });
   }
 
   // 这里只同步原生命中状态，不触发悬停/看向动画，避免换帧递归。
@@ -180,6 +238,7 @@
     requestAnimationFrame(() => {
       bubbleEl.classList.add('show');
       syncHitTest();
+      publishBubble();
     });
     if (ttl) bubbleTimer = setTimeout(hideBubble, ttl);
   }
@@ -190,6 +249,7 @@
     bubbleEl.classList.remove('show');
     bubbleKind = null;
     syncHitTest();
+    publishBubble();
     setTimeout(() => {
       if (!bubbleEl.classList.contains('show')) bubbleEl.hidden = true;
     }, 220);
@@ -292,7 +352,9 @@
     onPointer(e.clientX, e.clientY);
   });
   // 主进程给的是窗口像素坐标和窗口尺寸，按视口比例换成 CSS 像素，页面缩放后也能对准宠物。
-  api.onCursor(({ x, y, w, h, forceHitTest }) => {
+  api.onCursor(({ x, y, w, h, forceHitTest, seq }) => {
+    // 告诉主进程“我还在处理鼠标消息”。通道长时间没有应答，主进程会自己重载/重建窗口。
+    if (seq) api.cursorAck(seq);
     if (forceHitTest) interactive = null;
     if (pressed) {
       setInteractive(true);
@@ -307,9 +369,19 @@
     endHover();
     stopLook();
     hideBubble();
-    interactive = null; // 强制同步原生状态，即使鼠标仍停在锁屏前同一个位置。
+    interactive = null; // 强制重新上报页面判断，即使鼠标仍停在锁屏前同一个位置。
     setInteractive(false);
     lastActivity = Date.now();
+  });
+  // 主进程的恢复流程用它确认页面还活着；重新报一次命中信息，布局变了也能立刻纠正。
+  api.onProbe((token) => {
+    publishHitMap();
+    publishBubble();
+    api.probeAck(token);
+  });
+  window.addEventListener('resize', () => {
+    publishHitMap();
+    publishBubble();
   });
 
   // ---------- 额度变化 → 宠物反应 ----------
@@ -440,6 +512,7 @@
     setVar('--sprite-h', `${metrics.spriteH}px`);
     setVar('--bubble-bottom', `${Math.round(metrics.spriteH * 0.92)}px`);
     syncHitTest();
+    publishHitMap();
     if (!pet) {
       spriteEl.className = 'sprite orb';
       spriteEl.style.backgroundImage = 'none';
@@ -456,6 +529,7 @@
       await img.decode();
       if (pet !== info) return;
       buildAlpha(img);
+      publishHitMap();
       const b = contentBounds(0, 0);
       if (b) {
         const headTop = metrics.spriteH - (b.top / pet.cellH) * metrics.spriteH;

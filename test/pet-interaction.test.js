@@ -12,7 +12,7 @@ async function createPet({ opaque = () => true, captureThrows = false, spriteRec
   const timers = new Map();
   const intervals = new Map();
   const subscriptions = {};
-  const calls = { starts: 0, ends: 0, clicks: 0, heartbeats: 0, moves: [], released: [], ignores: [] };
+  const calls = { starts: 0, ends: 0, clicks: 0, heartbeats: 0, acks: 0, probeAcks: 0, moves: [], released: [], ignores: [], hitMaps: [], bubbles: [] };
   let timerId = 0;
   let ignoring = true; // Initial native BrowserWindow state.
   function element(rect) {
@@ -51,12 +51,17 @@ async function createPet({ opaque = () => true, captureThrows = false, spriteRec
   window.matchMedia = () => ({ matches: false });
   window.quotaPet = {
     getState: async () => ({ pet, metrics: { spriteW: 120, spriteH: 125 }, config: {}, quota: {} }),
-    setIgnoreMouse: (ignore) => { ignoring = ignore; calls.ignores.push(ignore); },
+    // 页面不再直接改原生穿透，只上报判断；这里用“是否要接住鼠标”记录，语义和原来一致。
+    setHit: (over) => { ignoring = !over; calls.ignores.push(!over); },
+    setHitMap: (map) => calls.hitMaps.push(map),
+    setHitBubble: (rect) => calls.bubbles.push(rect),
+    cursorAck: () => calls.acks++,
+    probeAck: () => calls.probeAcks++,
     setPetIcon() {},
     interactionHeartbeat: () => calls.heartbeats++,
     dragStart: () => calls.starts++, dragEnd: () => calls.ends++,
     dragMove: (dx, dy) => calls.moves.push([dx, dy]), petClick: () => calls.clicks++, petMenu() {},
-    ...Object.fromEntries(['Quota', 'Config', 'Pet', 'Cursor', 'InteractionReset', 'PanelVisible', 'Debug']
+    ...Object.fromEntries(['Quota', 'Config', 'Pet', 'Cursor', 'InteractionReset', 'PanelVisible', 'Debug', 'Probe']
       .map((name) => [`on${name}`, (cb) => { subscriptions[name] = cb; }])),
   };
   const context = vm.createContext({
@@ -280,4 +285,42 @@ test('repeated refreshes and interrupted drags keep subsequent clicks working', 
   assert.equal(pet.calls.starts, 400);
   assert.equal(pet.calls.ends, 400);
   assert.equal(pet.calls.clicks, 200);
+});
+
+test('page uploads the opaque pixels of its current frame so the main process can hit test', async () => {
+  const pet = await createPet({
+    opaque: (row, col) => row === 0 && col === 0,
+    viewport: { innerWidth: 260, innerHeight: 208 },
+  });
+  assert.ok(pet.calls.hitMaps.length > 0, 'a hit map must be published on load');
+  const map = pet.calls.hitMaps.at(-1);
+  assert.equal(map.cellW, 192);
+  assert.equal(map.cellH, 208);
+  assert.equal(map.cols, Math.ceil(192 / 4));
+  assert.equal(map.rows, Math.ceil(208 / 4));
+  assert.equal(map.viewport.w, 260);
+  assert.equal(map.sprite.width, 120);
+  assert.ok(map.alpha, 'the alpha mask must be uploaded for sprite pets');
+  assert.ok(map.alpha.some((v) => v > 40));
+  assert.equal(map.alpha.reduce((a, b) => a + (b > 40 ? 1 : 0), 0), 48 * 52);
+});
+
+test('page acknowledges cursor updates and answers the recovery probe', async () => {
+  const pet = await createPet({ viewport: { innerWidth: 260, innerHeight: 208 } });
+  pet.subscriptions.Cursor({ x: 130, y: 146, seq: 7 });
+  assert.equal(pet.calls.acks, 1);
+  pet.subscriptions.Probe('token-1');
+  assert.equal(pet.calls.probeAcks, 1);
+  assert.ok(pet.calls.hitMaps.length > 0, 'the probe response must carry a fresh hit map');
+});
+
+test('page reports bubble geometry so hovering the bubble still catches the mouse', async () => {
+  const pet = await createPet({ viewport: { innerWidth: 260, innerHeight: 208 } });
+  pet.calls.bubbles.length = 0;
+  pet.subscriptions.Debug({ summary: true });
+  const shown = pet.calls.bubbles.at(-1);
+  assert.ok(shown && shown.width > 0 && shown.height > 0, 'a visible bubble must publish its rect');
+  pet.bubble.classList.remove('show');
+  pet.subscriptions.InteractionReset();
+  assert.equal(pet.calls.bubbles.at(-1), null, 'hiding the bubble must clear the rect');
 });

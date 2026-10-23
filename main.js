@@ -75,6 +75,8 @@ let panelHiddenAt = -Infinity;
 let panelHeight = 460;
 let dragOrigin = null;
 let dragMoved = false;
+let dragStartedAt = 0;
+let pointerDown = false;
 let refreshTimer = null;
 let cursorTimer = null;
 let heartbeatTimer = null;
@@ -82,6 +84,19 @@ let lastBeat = null;
 let lastPetHeartbeat = 0;
 let petRefitTimer = null;
 let resumeRefreshTimer = null;
+
+// 鼠标穿透由主进程按页面发来的透明度图自己判断：页面卡住或消息丢了，宠物也不会变成
+// 一个看得见却点不动的空壳。页面只负责上传“当前帧哪些像素不透明”。
+let hitMap = null;
+let bubbleHitRect = null;
+let rendererOver = null;
+let passthroughIgnoring = null;
+let lastCursorSeq = 0;
+let lastCursorAckAt = 0;
+let lastRecoverAt = -Infinity;
+let lastRebuildAt = -Infinity;
+let probeFailStreak = 0;
+const probeWaiters = new Map();
 
 const userFile = (name) => path.join(app.getPath('userData'), name);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -249,7 +264,12 @@ function reloadOnCrash(win, onGone) {
 
 function createPetWindow() {
   const m = petMetrics();
-  petWin = new BrowserWindow({
+  // 上一只宠物窗口的命中信息不能带到新窗口上。
+  hitMap = null;
+  bubbleHitRect = null;
+  passthroughIgnoring = null;
+  pointerDown = false;
+  const win = new BrowserWindow({
     ...boundsFromAnchor(petAnchor(m), m),
     show: false,
     frame: false,
@@ -263,30 +283,51 @@ function createPetWindow() {
     fullscreenable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
-    focusable: false,
+    // Windows 非激活窗口在远程控制/桌面切换后可能只收到 mouseUp，丢掉 mouseDown。
+    // 允许点击时激活；启动和恢复仍用 showInactive()，不主动抢焦点。
+    focusable: process.platform === 'win32',
     title: 'QuotaPet',
     webPreferences: webPrefs({ backgroundThrottling: false }),
   });
-  petWin.setAlwaysOnTop(true, 'screen-saver');
-  // 透明区域鼠标穿透；渲染进程发现鼠标落在宠物不透明像素上时再关掉穿透
-  petWin.setIgnoreMouseEvents(true, { forward: true });
-  petWin.loadURL('qp://app/renderer/pet.html');
+  petWin = win;
+  win.setAlwaysOnTop(true, 'screen-saver');
+  // 透明区域鼠标穿透；主进程按页面传来的透明度图决定何时关掉穿透
+  win.setIgnoreMouseEvents(true, { forward: true });
+  passthroughIgnoring = true;
+  win.loadURL('qp://app/renderer/pet.html');
   // 缩放按源（qp://app）共享并会记进配置。旧版的默认菜单能用 Ctrl+加号 放大面板，宠物也被一起放大，
   // 页面坐标就和窗口对不上了；每次加载都恢复 100%。
-  const wc = petWin.webContents;
+  const wc = win.webContents;
   wc.on('did-finish-load', () => {
     wc.setZoomLevel(0);
     lastPetHeartbeat = performance.now();
-    restorePetInteraction();
+    lastCursorAckAt = performance.now();
+    probeFailStreak = 0;
+    restorePetInteraction('load');
   });
   // 页面没了先恢复穿透、丢掉拖动状态，免得这块透明窗口挡住桌面。
-  reloadOnCrash(petWin, resetPetInteraction);
-  petWin.once('ready-to-show', () => {
-    if (!config.get().petHidden) petWin.showInactive();
+  reloadOnCrash(win, resetPetInteraction);
+  win.once('ready-to-show', () => {
+    if (!config.get().petHidden) win.showInactive();
   });
-  petWin.on('closed', () => {
-    petWin = null;
+  win.on('closed', () => {
+    // 重建窗口时旧窗口的 closed 事件晚到，不能把新窗口的引用清掉。
+    if (petWin === win) petWin = null;
   });
+}
+
+// 最后手段：整个窗口重造。穿透位、层级、DPI 上下文全部回到初始状态。
+function recreatePetWindow() {
+  logRecovery('rebuild-window');
+  const old = petWin;
+  petWin = null;
+  if (old && !old.isDestroyed()) {
+    try {
+      old.destroy();
+    } catch {}
+  }
+  createPetWindow();
+  rebuildMenu();
 }
 
 function createPanelWindow() {
@@ -436,6 +477,9 @@ function setPetHidden(hidden) {
       petWin.hide();
     } else {
       petWin.showInactive();
+      // 隐藏期间不会有光标应答，重新显示后从当下重新计时。
+      lastCursorAckAt = performance.now();
+      applyPassthrough(cursorInPet(), 'show');
     }
   }
   rebuildMenu();
@@ -494,7 +538,6 @@ function buildMenu() {
     { label: '设置…', click: () => openSettings() },
     { label: '开机自动启动', type: 'checkbox', checked: getAutoStart(), click: (item) => setAutoStart(item.checked) },
     { label: cfg.petHidden ? '显示宠物' : '隐藏宠物', click: () => setPetHidden(!cfg.petHidden) },
-    { label: '恢复宠物交互', click: () => reactivatePet('manual') },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ]);
@@ -545,6 +588,8 @@ function applyPet() {
   if (!petWin) return;
   const m = petMetrics();
   petWin.setBounds(boundsFromAnchor(anchorFromBounds(petWin.getBounds()), m));
+  hitMap = null; // 换了宠物/大小，页面稍后会上传新的透明度图
+  applyPassthrough(cursorInPet(), 'pet-change');
   sendTo(petWin, 'pet:changed', { pet: petInfo(), metrics: m, config: publicConfig() });
 }
 
@@ -625,7 +670,8 @@ function cursorInPet() {
   return { x: pp.x - pb.x, y: pp.y - pb.y, w: pb.width, h: pb.height };
 }
 
-// 渲染进程拿不到窗口外的鼠标位置，由主进程轮询后转发（用于眼睛跟随和穿透判断）
+// 渲染进程拿不到窗口外的鼠标位置，由主进程轮询后转发（眼睛跟随、悬停气泡）。
+// 穿透判断不交给页面：主进程拿页面传来的透明度图自己算，页面即使卡死也点得动。
 function startCursorPolling() {
   let last = '';
   let lastSentAt = 0;
@@ -633,17 +679,89 @@ function startCursorPolling() {
   cursorTimer = setInterval(() => {
     if (!petWin || petWin.isDestroyed() || !petWin.isVisible()) return;
     const c = cursorInPet();
+    applyPassthrough(c, 'poll');
     const key = `${c.x},${c.y},${c.w},${c.h}`;
     const now = performance.now();
     // 静止时也定期校准，避免窗口隐藏/恢复或重载后沿用旧的穿透状态。
     if (key === last && now - lastSentAt < 1000) return;
     last = key;
     lastSentAt = now;
-    // Windows/远程桌面可能改变原生窗口样式，页面缓存的 interactive 值不能代表原生状态。
+    // 页面缓存的状态可能过时，定期强制它重新判断一次（悬停/眼睛跟随用）。
     const forceHitTest = now - lastHitTestAt >= 1000;
     if (forceHitTest) lastHitTestAt = now;
-    sendTo(petWin, 'pet:cursor', { ...c, forceHitTest });
+    lastCursorSeq += 1;
+    sendTo(petWin, 'pet:cursor', { ...c, seq: lastCursorSeq, forceHitTest });
   }, 50);
+}
+
+// ---------- 鼠标穿透（主进程说了算） ----------
+
+const inRect = (x, y, r) => x >= r.left && x <= r.left + r.width && y >= r.top && y <= r.top + r.height;
+
+// 光标（窗口物理像素）是否落在当前帧的不透明像素上。页面没给透明度图时退回精灵矩形。
+function maskHitAt(c) {
+  if (!petWin || petWin.isDestroyed()) return null;
+  const b = petWin.getBounds();
+  if (!(b.width > 0) || !(b.height > 0)) return null;
+  const m = hitMap;
+  if (!m || !m.sprite) {
+    // 还没收到透明度图（启动瞬间、或页面已经坏掉）：按精灵矩形兜底，保证一开始就能点。
+    const pm = petMetrics();
+    const left = (c.w * (b.width - pm.spriteW)) / 2 / b.width;
+    const top = c.h * (b.height - pm.spriteH) / b.height;
+    return inRect(c.x, c.y, {
+      left,
+      top,
+      width: (c.w * pm.spriteW) / b.width,
+      height: (c.h * pm.spriteH) / b.height,
+    });
+  }
+  const s = m.sprite;
+  const vw = m.viewport.w;
+  const vh = m.viewport.h;
+  if (!(vw > 0) || !(vh > 0) || !(c.w > 0) || !(c.h > 0)) return null;
+  // 窗口物理像素 → 页面 CSS 像素（页面被缩放时两者不是 1:1）
+  const x = (c.x * vw) / c.w;
+  const y = (c.y * vh) / c.h;
+  const inSprite = inRect(x, y, s);
+  if (!m.alpha) return inSprite; // 兜底圆球没有透明度图：整块精灵都算宠物
+  if (!inSprite) return false;
+  const fx = ((x - s.left) / s.width) * m.cellW;
+  const fy = ((y - s.top) / s.height) * m.cellH;
+  const sx = Math.floor(fx / m.q);
+  const sy = Math.floor(fy / m.q);
+  for (let oy = -2; oy <= 2; oy++) {
+    for (let ox = -2; ox <= 2; ox++) {
+      const ax = sx + ox;
+      const ay = sy + oy;
+      if (ax >= 0 && ay >= 0 && ax < m.cols && ay < m.rows && m.alpha[ay * m.cols + ax] > 40) return true;
+    }
+  }
+  return false;
+}
+
+function bubbleHitAt(c) {
+  if (!bubbleHitRect || !hitMap) return false;
+  const vw = hitMap.viewport.w;
+  const vh = hitMap.viewport.h;
+  if (!(vw > 0) || !(vh > 0) || !(c.w > 0) || !(c.h > 0)) return false;
+  return inRect((c.x * vw) / c.w, (c.y * vh) / c.h, bubbleHitRect);
+}
+
+// 原生穿透状态只在这里改；拖动中或悬停气泡时必须接住鼠标。
+function setPassthrough(ignore, reason) {
+  if (!petWin || petWin.isDestroyed() || ignore === passthroughIgnoring) return;
+  passthroughIgnoring = ignore;
+  petWin.setIgnoreMouseEvents(ignore, { forward: true });
+  logUi({ ev: 'ignore', value: ignore });
+  // 只记“非普通悬停”的变化，避免鼠标进出时刷满日志。
+  if (reason !== 'poll') logRecovery('passthrough', { ignore, reason });
+}
+
+function applyPassthrough(c = cursorInPet(), reason = 'poll') {
+  if (!petWin || petWin.isDestroyed()) return;
+  const hit = maskHitAt(c);
+  setPassthrough(!(hit === true || bubbleHitAt(c) || pointerDown), reason);
 }
 
 function endPetDrag() {
@@ -653,6 +771,9 @@ function endPetDrag() {
   }
   dragOrigin = null;
   dragMoved = false;
+  dragStartedAt = 0;
+  pointerDown = false;
+  if (petWin && !petWin.isDestroyed()) applyPassthrough(cursorInPet(), 'drag-end');
 }
 
 function resetPetInteraction() {
@@ -660,22 +781,71 @@ function resetPetInteraction() {
   if (!petWin || petWin.isDestroyed()) return;
   // 锁屏会切换 Windows 桌面，非聚焦窗口未必收到 blur/pointerup。
   // 同时清掉页面缓存、捕获和原生穿透转发；仅重发鼠标坐标会被页面的状态去重跳过。
-  petWin.setIgnoreMouseEvents(false);
+  passthroughIgnoring = null;
   petWin.setIgnoreMouseEvents(true, { forward: true });
+  passthroughIgnoring = true;
   sendTo(petWin, 'pet:interaction-reset');
 }
 
-function restorePetInteraction() {
+// 页面还活着吗？主进程只认页面自己对探查的应答：能回话才说明它还在处理消息。
+function probePetRenderer(timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const wc = petWin && !petWin.isDestroyed() ? petWin.webContents : null;
+    if (!wc || wc.isDestroyed() || wc.isCrashed()) return resolve(false);
+    const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let timer = null;
+    const done = (ok) => {
+      if (!probeWaiters.has(token)) return;
+      probeWaiters.delete(token);
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    probeWaiters.set(token, done);
+    timer = setTimeout(() => done(false), timeoutMs);
+    sendTo(petWin, 'pet:probe', token);
+  });
+}
+
+// 页面不应答时逐级升级：先结束渲染进程让它重新加载，还不行就整窗重建。
+// 重建是最后手段——只有重造 HWND 才能把所有原生状态（穿透、层级、DPI 上下文）一次抹平。
+async function escalateUnresponsivePet(reason) {
+  probeFailStreak += 1;
+  logRecovery('renderer-unresponsive', { reason, streak: probeFailStreak });
   if (!petWin || petWin.isDestroyed()) return;
+  if (probeFailStreak < 2) {
+    try {
+      petWin.webContents.forcefullyCrashRenderer();
+    } catch {}
+    return;
+  }
+  const now = performance.now();
+  if (now - lastRebuildAt < 60000) return; // 一分钟内最多重建一次，避免死循环
+  lastRebuildAt = now;
+  recreatePetWindow();
+}
+
+async function restorePetInteraction(reason = 'restore') {
+  if (!petWin || petWin.isDestroyed()) return false;
   resetPetInteraction();
   const m = petMetrics();
   petWin.setBounds(boundsFromAnchor(petAnchor(m), m));
+  if (process.platform === 'win32') {
+    petWin.setFocusable(true);
+    // Electron 的 setFocusable(true) 会同时取消 skipTaskbar，需要重新隐藏任务栏入口。
+    petWin.setSkipTaskbar(true);
+  }
   petWin.webContents.setZoomLevel(0);
   petWin.setAlwaysOnTop(true, 'screen-saver');
   if (!config.get().petHidden && !petWin.isVisible()) petWin.showInactive();
   placePanel();
-  // 不等鼠标移动或轮询去重超时，立即让页面按当前位置重新命中测试。
-  sendTo(petWin, 'pet:cursor', cursorInPet());
+  lastCursorAckAt = performance.now();
+  // 不等鼠标移动或轮询去重超时，立刻按当前位置重算一次穿透。
+  applyPassthrough(cursorInPet(), 'restore');
+  lastPetHeartbeat = performance.now();
+  const ok = await probePetRenderer();
+  if (ok) probeFailStreak = 0;
+  else await escalateUnresponsivePet(reason);
+  return ok;
 }
 
 // 显示器唤醒、插拔或改缩放后，再等布局稳定校准一次；用户已开始新的拖动时不打断它。
@@ -683,8 +853,9 @@ function schedulePetRefit() {
   clearTimeout(petRefitTimer);
   petRefitTimer = setTimeout(() => {
     petRefitTimer = null;
-    if (dragOrigin) schedulePetRefit();
-    else restorePetInteraction();
+    // 漏收松手时 dragOrigin 会一直挂着，不能无限自我重排，否则显示变化后再也不校准。
+    if (dragOrigin && performance.now() - dragStartedAt < 30000) schedulePetRefit();
+    else restorePetInteraction('display-change');
   }, 1500);
 }
 
@@ -697,6 +868,7 @@ function watchDisplays() {
       });
       // 旧拖动基于旧屏幕坐标，先取消；不能等拖动结束才恢复，否则漏收松手会永久跳过校准。
       hidePanel();
+      hitMap = null; // 分辨率/缩放变了，页面稍后会重新上传
       resetPetInteraction();
       schedulePetRefit();
     });
@@ -706,9 +878,11 @@ function watchDisplays() {
 // 解锁、唤醒，或心跳发现系统睡过一觉之后：重新校准宠物窗口，稍后刷新一次额度。
 function reactivatePet(reason = 'resume') {
   logRecovery('reactivate', { reason });
+  lastRecoverAt = performance.now();
   lastPetHeartbeat = performance.now();
+  lastCursorAckAt = performance.now();
   panelHiddenAt = -Infinity;
-  restorePetInteraction();
+  restorePetInteraction(reason);
   schedulePetRefit();
   clearTimeout(resumeRefreshTimer);
   resumeRefreshTimer = setTimeout(() => quota.refresh(), 5000);
@@ -742,11 +916,47 @@ function checkPetHeartbeat(now) {
     return;
   }
   const wc = petWin.webContents;
-  if (wc.isDestroyed() || wc.isCrashed() || wc.isLoadingMainFrame() || now - lastPetHeartbeat < 15000) return;
+  if (wc.isDestroyed() || now - lastPetHeartbeat < 15000) return;
+  // 卡在崩溃/重载状态超过半分钟，说明它自己回不来了，直接重造窗口。
+  if (wc.isCrashed() || wc.isLoadingMainFrame()) {
+    if (now - lastPetHeartbeat < 30000) return;
+    logRecovery('renderer-stuck', { crashed: wc.isCrashed(), loading: wc.isLoadingMainFrame() });
+    lastPetHeartbeat = now;
+    recreatePetWindow();
+    return;
+  }
   logRecovery('renderer-heartbeat-timeout', { silentMs: Math.round(now - lastPetHeartbeat) });
   lastPetHeartbeat = now;
   // reload 无法打断卡住的 JavaScript；先结束失去响应的渲染进程，gone 监听器负责重载。
   wc.forcefullyCrashRenderer();
+}
+
+// 页面能发心跳、却不处理鼠标消息，是最难查的死法：主进程发出去的 pet:cursor 一直没人应答。
+// 这里发现通道停摆就按“唤醒”处理一次，自行重载/重建，不依赖用户去点托盘。
+// 注意判据是“页面有没有回执”，与用户是否移动、点击鼠标无关：主进程即使一动不动也每秒发一次
+// 光标位置，页面收到就立刻回执一次，所以只要页面还活着，这个计时器每秒都会被刷新。
+function checkCursorChannel(now) {
+  // 没在发鼠标消息（隐藏宠物、自动化测试）就谈不上通道停摆。
+  if (!cursorTimer) {
+    lastCursorAckAt = now;
+    return;
+  }
+  if (!petWin || petWin.isDestroyed() || !petWin.isVisible()) {
+    lastCursorAckAt = now;
+    return;
+  }
+  if (!lastCursorAckAt) {
+    lastCursorAckAt = now;
+    return;
+  }
+  if (now - lastCursorAckAt < 10000) return;
+  if (now - lastRecoverAt < 30000) return;
+  logRecovery('cursor-channel-stalled', {
+    silentMs: Math.round(now - lastCursorAckAt),
+    sent: lastCursorSeq,
+    rendererOver,
+  });
+  reactivatePet('cursor-stall');
 }
 
 // 通知漏发时的兜底：心跳停摆了好几秒，说明系统睡过或主线程卡过，按刚唤醒处理一次。
@@ -758,7 +968,10 @@ function watchClockGaps() {
     const gap = Math.max(beat.mono - lastBeat.mono, beat.wall - lastBeat.wall);
     lastBeat = beat;
     if (gap > 5000) reactivatePet('clock-gap');
-    else checkPetHeartbeat(beat.mono);
+    else {
+      checkPetHeartbeat(beat.mono);
+      checkCursorChannel(beat.mono);
+    }
   }, 1000);
 }
 
@@ -835,10 +1048,61 @@ function registerIpc() {
     } catch {}
   });
 
-  ipcMain.on('pet:ignore-mouse', (e, ignore) => {
-    if (!trusted(e) || !petWin) return;
-    petWin.setIgnoreMouseEvents(Boolean(ignore), { forward: true });
-    logUi({ ev: 'ignore', value: Boolean(ignore) });
+  // 页面只上传“当前帧哪些像素不透明”，穿透由主进程自己决定。
+  ipcMain.on('pet:hit-map', (e, payload) => {
+    if (!trusted(e) || !payload || typeof payload !== 'object') return;
+    const cellW = Number(payload.cellW);
+    const cellH = Number(payload.cellH);
+    const q = Number(payload.q);
+    const s = payload.sprite;
+    const vp = payload.viewport;
+    if (!(cellW > 0 && cellH > 0 && q >= 1) || !s || !vp) return;
+    const cols = Math.max(1, Math.min(4096, Math.ceil(cellW / q)));
+    const rows = Math.max(1, Math.min(4096, Math.ceil(cellH / q)));
+    let alpha = null;
+    if (payload.alpha) {
+      const src = ArrayBuffer.isView(payload.alpha) ? payload.alpha : null;
+      if (!src || src.length < cols * rows) return;
+      alpha = src instanceof Uint8Array ? src : new Uint8Array(src.buffer, src.byteOffset, cols * rows);
+      if (alpha.length !== cols * rows) alpha = alpha.slice(0, cols * rows);
+    }
+    hitMap = {
+      cellW,
+      cellH,
+      q,
+      cols,
+      rows,
+      alpha,
+      cell: { row: Math.max(0, Number(payload.cell && payload.cell.row) || 0), col: Math.max(0, Number(payload.cell && payload.cell.col) || 0) },
+      sprite: { left: Number(s.left) || 0, top: Number(s.top) || 0, width: Number(s.width) || 0, height: Number(s.height) || 0 },
+      viewport: { w: Number(vp.w) || 0, h: Number(vp.h) || 0 },
+    };
+    applyPassthrough(cursorInPet(), 'hit-map');
+  });
+  // 悬停气泡也是窗口的一部分，鼠标落在上面同样要接住。
+  ipcMain.on('pet:hit-bubble', (e, rect) => {
+    if (!trusted(e)) return;
+    if (!rect) {
+      bubbleHitRect = null;
+    } else if (typeof rect === 'object') {
+      const r = { left: Number(rect.left) || 0, top: Number(rect.top) || 0, width: Number(rect.width) || 0, height: Number(rect.height) || 0 };
+      bubbleHitRect = r.width > 0 && r.height > 0 ? r : null;
+    }
+    applyPassthrough(cursorInPet(), 'hit-bubble');
+  });
+  // 页面自己的判断，只用于诊断与兜底日志；原生状态由主进程算。
+  ipcMain.on('pet:hit', (e, over) => {
+    if (!trusted(e)) return;
+    rendererOver = Boolean(over);
+  });
+  ipcMain.on('pet:cursor-ack', (e, seq) => {
+    if (!trusted(e) || typeof seq !== 'number') return;
+    lastCursorAckAt = performance.now();
+  });
+  ipcMain.on('pet:probe-ack', (e, token) => {
+    if (!trusted(e)) return;
+    const done = probeWaiters.get(token);
+    if (done) done(true);
   });
   ipcMain.on('pet:heartbeat', (e) => {
     if (petWin && e.sender === petWin.webContents && trusted(e)) lastPetHeartbeat = performance.now();
@@ -847,6 +1111,9 @@ function registerIpc() {
     if (!trusted(e) || !petWin) return;
     dragOrigin = petWin.getBounds();
     dragMoved = false;
+    dragStartedAt = performance.now();
+    pointerDown = true;
+    applyPassthrough(cursorInPet(), 'drag-start');
   });
   ipcMain.on('pet:drag-move', (e, dx, dy) => {
     if (!trusted(e) || !petWin || !dragOrigin) return;
@@ -987,6 +1254,12 @@ async function checkSessionRecovery() {
       button: 'left', clickCount: 1, modifiers: down ? ['leftButtonDown'] : [],
     });
   };
+  // 测试里不能用真实鼠标，所以把“光标在这里”同时喂给页面和主进程的穿透判断。
+  const hoverAt = (x, y, forceHitTest = false) => {
+    const b = petWin.getBounds();
+    sendTo(petWin, 'pet:cursor', { x, y, forceHitTest });
+    applyPassthrough({ x, y, w: b.width, h: b.height }, 'test');
+  };
   for (const events of scenarios) {
     const displayMethods = ['getAllDisplays', 'getPrimaryDisplay', 'getDisplayNearestPoint'];
     const originals = Object.fromEntries(displayMethods.map((name) => [name, screen[name]]));
@@ -1007,7 +1280,7 @@ async function checkSessionRecovery() {
       const b = petWin.getBounds();
       const x = Math.round(b.width / 2);
       const y = Math.round(b.height - petMetrics().spriteH * 0.45);
-      sendTo(petWin, 'pet:cursor', { x, y });
+      hoverAt(x, y);
       await sleep(60);
       // 故意不发 mouseUp，覆盖切换桌面时丢失松手事件的情况。
       input('mouseDown', x, y);
@@ -1050,7 +1323,7 @@ async function checkSessionRecovery() {
       input('mouseUp', x, y); // 清理 Chromium 的合成按钮状态。
       await sleep(60);
       assert.equal(panelWin.isVisible(), false, `late mouseUp must not open the panel: ${events}`);
-      sendTo(petWin, 'pet:cursor', { x, y });
+      hoverAt(x, y);
       await sleep(60);
       const before = petWin.getBounds();
       input('mouseDown', x, y);
@@ -1072,21 +1345,42 @@ async function checkSessionRecovery() {
   hidePanel();
   const c = petWin.getBounds();
   const atPet = { x: Math.round(c.width / 2), y: Math.round(c.height - petMetrics().spriteH * 0.45) };
-  sendTo(petWin, 'pet:cursor', atPet);
+  hoverAt(atPet.x, atPet.y);
   await sleep(60);
-  // 故意使原生穿透与页面缓存不一致；验证静止鼠标时也会重发原生设置。
+  // 故意让原生穿透与主进程记录不一致；验证静止鼠标时也会重新下发原生设置。
   petWin.setIgnoreMouseEvents(true, { forward: true });
+  passthroughIgnoring = null;
   uiLog.length = 0;
-  sendTo(petWin, 'pet:cursor', { ...atPet, forceHitTest: true });
+  hoverAt(atPet.x, atPet.y, true);
   await sleep(60);
   assert.ok(uiLog.some((e) => e.ev === 'ignore' && e.value === false), 'native hit test drift must be repaired');
+  // 页面还活着：探查必须能应答，否则恢复流程会把它当成卡死并重载。
+  assert.equal(await probePetRenderer(), true, 'pet renderer must answer the recovery probe');
+  // 挪到透明角落：必须重新变回穿透，不能挡住桌面。
+  hoverAt(3, 3);
+  await sleep(60);
+  assert.equal(passthroughIgnoring, true, 'transparent pixels must pass clicks through');
   setPetHidden(true);
   powerMonitor.emit('lock-screen');
   powerMonitor.emit('unlock-screen');
   await sleep(1650);
   assert.equal(petWin.isVisible(), false, 'session recovery must respect the hidden-pet setting');
   setPetHidden(false);
-  return { scenarios: results, hiddenPetStayedHidden: true, nativeHitTestResynchronized: true };
+  // 最后一道防线：整窗重造之后宠物必须回来、还必须能应答。
+  const previous = petWin;
+  const rebuilt = await new Promise((resolve) => {
+    const started = Date.now();
+    const check = () => {
+      if (petWin && petWin !== previous && !petWin.isDestroyed() && petWin.isVisible()) return resolve(true);
+      if (Date.now() - started > 10000) return resolve(false);
+      setTimeout(check, 100);
+    };
+    recreatePetWindow();
+    check();
+  });
+  assert.equal(rebuilt, true, 'a rebuilt pet window must come back');
+  assert.equal(await probePetRenderer(), true, 'a rebuilt pet window must answer the probe');
+  return { scenarios: results, hiddenPetStayedHidden: true, nativeHitTestResynchronized: true, rebuiltWindowUsable: true };
 }
 
 // 用合成事件走一遍交互（不碰真实鼠标）：悬停 → 穿透 → 看向 → 拖动 → 点击开面板
@@ -1254,5 +1548,7 @@ app.on('before-quit', () => {
   clearInterval(heartbeatTimer);
   clearTimeout(petRefitTimer);
   clearTimeout(resumeRefreshTimer);
+  for (const done of probeWaiters.values()) done(false);
+  probeWaiters.clear();
   fs.unwatchFile(DESKTOP_HISTORY_FILE);
 });
