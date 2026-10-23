@@ -7,6 +7,9 @@
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => [...document.querySelectorAll(sel)];
 
+  // 宠物行为的开关，id 和配置项同名
+  const SWITCHES = ['eyeFollow', 'idleSelfPlay', 'wander', 'chatter', 'sleepWhenAway', 'throwable'];
+
   let st = null;
   let toastTimer = 0;
 
@@ -78,8 +81,7 @@
     }
     sel.value = String(c.refreshMinutes);
     for (const box of $$('[data-provider]')) box.checked = c.providers[box.dataset.provider] !== false;
-    $('#eyeFollow').checked = Boolean(c.eyeFollow);
-    $('#idleSelfPlay').checked = Boolean(c.idleSelfPlay);
+    for (const k of SWITCHES) $(`#${k}`).checked = c[k] !== false;
     $('#autoStart').checked = Boolean(c.autoStart);
     if (document.activeElement !== $('#proxy')) $('#proxy').value = c.proxy || '';
     if (document.activeElement !== $('#codexPath')) $('#codexPath').value = c.codexPath || '';
@@ -141,8 +143,7 @@
   for (const box of $$('[data-provider]')) {
     box.addEventListener('change', () => save({ providers: { [box.dataset.provider]: box.checked } }));
   }
-  $('#eyeFollow').addEventListener('change', (e) => save({ eyeFollow: e.target.checked }));
-  $('#idleSelfPlay').addEventListener('change', (e) => save({ idleSelfPlay: e.target.checked }));
+  for (const k of SWITCHES) $(`#${k}`).addEventListener('change', (e) => save({ [k]: e.target.checked }));
   $('#proxy').addEventListener('change', (e) => save({ proxy: e.target.value }));
   $('#codexPath').addEventListener('change', (e) => save({ codexPath: e.target.value }));
   $('#autoStart').addEventListener('change', async (e) => {

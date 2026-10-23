@@ -16,6 +16,7 @@ body {
   width: var(--sprite-w, 115px);
   height: var(--sprite-h, 125px);
   transform: translateX(-50%);
+  transform-origin: 50% 100%; /* 落地挤压、睡觉呼吸都以脚底为基准 */
   background-repeat: no-repeat;
   cursor: pointer;
   will-change: background-position;
@@ -23,6 +24,119 @@ body {
 
 .sprite.dragging {
   cursor: grabbing;
+}
+
+/* 睡着时轻轻起伏 */
+.sprite.sleeping {
+  animation: doze 3.6s ease-in-out infinite;
+}
+
+@keyframes doze {
+  50% {
+    transform: translateX(-50%) scale(1.02, 0.97);
+  }
+}
+
+/* 头顶小图标：💤 睡着、💦 额度紧张、❗ 全部读取失败 */
+.badge {
+  position: absolute;
+  z-index: 1;
+  left: calc(50% + var(--badge-x, 28px));
+  bottom: var(--badge-y, 88px);
+  font-size: calc(var(--sprite-w, 115px) * 0.17);
+  line-height: 1;
+  transform: translateX(-50%);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25));
+  pointer-events: none;
+}
+
+.badge[data-kind="sleep"] {
+  animation: zzz 2.4s ease-out infinite;
+}
+
+.badge[data-kind="danger"] {
+  animation: drip 1.5s ease-in infinite;
+}
+
+.badge[data-kind="warn"] {
+  font-size: calc(var(--sprite-w, 115px) * 0.13);
+  animation: drip 2.6s ease-in infinite;
+}
+
+.badge[data-kind="error"] {
+  animation: nudge 1.8s ease-in-out infinite;
+}
+
+@keyframes zzz {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 6px) scale(0.7);
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-20%, -16px) scale(1.1);
+  }
+}
+
+@keyframes drip {
+  0%,
+  15% {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  35%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 10px);
+  }
+}
+
+@keyframes nudge {
+  0%,
+  100% {
+    transform: translateX(-50%) rotate(0);
+  }
+  50% {
+    transform: translate(-50%, -3px) rotate(10deg);
+  }
+}
+
+/* 撸猫的爱心、额度回满的彩带：从一点往上飘 */
+.fx {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.particle {
+  position: absolute;
+  font-size: 15px;
+  line-height: 1;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  animation: float-up 1.15s ease-out forwards;
+}
+
+@keyframes float-up {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -20%) scale(0.6);
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -280%) scale(1.15);
+  }
 }
 
 /* 没有找到 Codex 宠物时的兜底形象：一颗会呼吸的小圆球 */
@@ -85,23 +199,25 @@ body {
   line-height: 1.55;
   white-space: nowrap;
   opacity: 0;
-  transform: translate(-50%, 6px) scale(0.96);
+  /* --bubble-dx：宠物贴着屏幕边时把气泡往里挪，见 pet.js 的 placeBubble */
+  transform: translate(calc(-50% + var(--bubble-dx, 0px)), 6px) scale(0.96);
   transform-origin: 50% 100%;
   transition:
     opacity 0.18s ease,
     transform 0.18s ease;
   cursor: pointer;
+  z-index: 3;
 }
 
 .bubble.show {
   opacity: 1;
-  transform: translate(-50%, 0) scale(1);
+  transform: translate(calc(-50% + var(--bubble-dx, 0px)), 0) scale(1);
 }
 
 .bubble::after {
   content: "";
   position: absolute;
-  left: 50%;
+  left: calc(50% - var(--bubble-dx, 0px));
   bottom: -5px;
   width: 10px;
   height: 10px;
@@ -121,10 +237,15 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .sprite.orb::before,
-  .sprite.orb::after {
+  .sprite.orb::after,
+  .sprite.sleeping,
+  .badge {
     animation: none;
   }
   .bubble {
     transition: none;
+  }
+  .fx {
+    display: none;
   }
 }

@@ -13,6 +13,10 @@ const DEFAULTS = {
   lowBalance: 10,
   idleSelfPlay: true,
   eyeFollow: true,
+  wander: true, // 闲着时沿任务栏走几步
+  chatter: true, // 看场合说句话
+  sleepWhenAway: true, // 离开电脑时睡觉，回来汇报
+  throwable: true, // 甩出去会飞、在屏幕边缘弹
   petHidden: false,
   theme: 'system', // system | light | dark
   codexPath: '',

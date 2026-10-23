@@ -26,6 +26,7 @@ const { fetchCodex, findCodexExe } = require('./src/providers/codex');
 const { fetchClaude, DESKTOP_HISTORY_FILE } = require('./src/providers/claude');
 const deepseek = require('./src/providers/deepseek');
 const QP = require('./renderer/shared');
+const Physics = require('./renderer/physics');
 
 const ROOT = __dirname;
 const argValue = (name) => {
@@ -45,6 +46,9 @@ app.setPath('userData', TEST_DIR
 const PET_PAD_TOP = 84; // 宠物头顶留给气泡的高度
 const PANEL_WIDTH = 384; // 卡片 344 + 两侧各 20px 投影留白
 const PANEL_MARGIN = 20;
+const MOTION_TICK = 16; // 抛飞、散步时每 16ms 挪一次窗口
+const AWAY_AFTER_S = 5 * 60; // 电脑闲置 5 分钟，宠物就睡觉
+const AWAY_REFRESH_MS = 30 * 60e3; // 人不在时最多半小时刷新一次
 const EXTERNAL_HOSTS = ['platform.deepseek.com'];
 const THEMES = [
   { label: '跟随系统', value: 'system' },
@@ -55,6 +59,14 @@ const SIZES = [
   { label: '小', value: 0.45 },
   { label: '中', value: 0.6 },
   { label: '大', value: 0.8 },
+];
+// 右键菜单“宠物行为”里的开关；眼睛跟随另外处理，旧版精灵图不支持
+const BEHAVIORS = [
+  { key: 'idleSelfPlay', label: '闲着时做小动作' },
+  { key: 'wander', label: '闲着时四处走走' },
+  { key: 'chatter', label: '看场合说说话' },
+  { key: 'sleepWhenAway', label: '离开时睡觉，回来汇报' },
+  { key: 'throwable', label: '可以甩出去' },
 ];
 
 protocol.registerSchemesAsPrivileged([
@@ -82,6 +94,10 @@ let lastBeat = null;
 let lastPetHeartbeat = 0;
 let petRefitTimer = null;
 let resumeRefreshTimer = null;
+let motion = null; // 正在由主进程移动宠物窗口：{ kind: 'fly' | 'walk', timer, ... }
+let awaySince = null; // 判定为离开的起点（毫秒）；人在时为 null
+let awayTimer = null;
+let resetRefreshTimer = null;
 
 const userFile = (name) => path.join(app.getPath('userData'), name);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -278,6 +294,8 @@ function createPetWindow() {
     wc.setZoomLevel(0);
     lastPetHeartbeat = performance.now();
     restorePetInteraction();
+    // 页面崩溃重载时人还没回来：接着睡
+    if (awaySince) sendTo(petWin, 'pet:away', { away: true });
   });
   // 页面没了先恢复穿透、丢掉拖动状态，免得这块透明窗口挡住桌面。
   reloadOnCrash(petWin, resetPetInteraction);
@@ -351,6 +369,7 @@ function placePanel() {
 
 function showPanel() {
   if (!panelWin || panelWin.isDestroyed()) createPanelWindow();
+  stopMotion('panel'); // 面板按宠物的位置摆放，宠物得先站住
   placePanel();
   panelWin.show();
   panelWin.focus();
@@ -432,6 +451,7 @@ function setPetHidden(hidden) {
   config.set({ petHidden: Boolean(hidden) });
   if (petWin) {
     if (hidden) {
+      stopMotion('hidden');
       hidePanel();
       petWin.hide();
     } else {
@@ -469,17 +489,22 @@ function buildMenu() {
       })),
     },
     {
-      label: '眼睛跟着鼠标',
-      type: 'checkbox',
-      checked: cfg.eyeFollow,
-      enabled: Boolean(currentPet && currentPet.hasLookFrames),
-      click: (item) => updateConfig({ eyeFollow: item.checked }),
-    },
-    {
-      label: '闲着时做小动作',
-      type: 'checkbox',
-      checked: cfg.idleSelfPlay,
-      click: (item) => updateConfig({ idleSelfPlay: item.checked }),
+      label: '宠物行为',
+      submenu: [
+        {
+          label: '眼睛跟着鼠标',
+          type: 'checkbox',
+          checked: cfg.eyeFollow,
+          enabled: Boolean(currentPet && currentPet.hasLookFrames),
+          click: (item) => updateConfig({ eyeFollow: item.checked }),
+        },
+        ...BEHAVIORS.map(({ key, label }) => ({
+          label,
+          type: 'checkbox',
+          checked: cfg[key] !== false,
+          click: (item) => updateConfig({ [key]: item.checked }),
+        })),
+      ],
     },
     {
       label: '外观',
@@ -543,9 +568,11 @@ function fullState() {
 
 function applyPet() {
   if (!petWin) return;
+  stopMotion('resize');
   const m = petMetrics();
   petWin.setBounds(boundsFromAnchor(anchorFromBounds(petWin.getBounds()), m));
   sendTo(petWin, 'pet:changed', { pet: petInfo(), metrics: m, config: publicConfig() });
+  sendEdge();
 }
 
 function setPet(id) {
@@ -571,7 +598,7 @@ function sanitize(patch) {
   if ('alertPercent' in patch) out.alertPercent = Math.round(clampNum(patch.alertPercent, 1, 50, 10));
   if ('lowBalance' in patch) out.lowBalance = clampNum(patch.lowBalance, 0, 1e6, 10);
   if ('scale' in patch) out.scale = clampNum(patch.scale, 0.3, 1.2, 0.6);
-  for (const k of ['idleSelfPlay', 'eyeFollow']) if (k in patch) out[k] = Boolean(patch[k]);
+  for (const k of ['eyeFollow', ...BEHAVIORS.map((b) => b.key)]) if (k in patch) out[k] = Boolean(patch[k]);
   for (const k of ['codexPath', 'proxy']) if (k in patch) out[k] = String(patch[k] || '').trim().slice(0, 500);
   if ('petId' in patch && pets.some((p) => p.id === patch.petId)) out.petId = patch.petId;
   if ('theme' in patch && THEMES.some((t) => t.value === patch.theme)) out.theme = patch.theme;
@@ -591,6 +618,8 @@ function updateConfig(patch) {
   if ('proxy' in patch) applyProxy().then(() => quota.refresh());
   if ('codexPath' in patch) quota.refresh(['codex']);
   if ('providers' in patch) quota.refresh();
+  if (patch.wander === false && motion && motion.kind === 'walk') stopMotion('off');
+  if (patch.sleepWhenAway === false) checkAway(); // 正睡着就叫醒，不汇报
   if ('eyeFollow' in patch || 'idleSelfPlay' in patch || 'alertPercent' in patch || 'lowBalance' in patch) {
     sendTo(petWin, 'config:changed', publicConfig());
   }
@@ -604,7 +633,38 @@ function updateConfig(patch) {
 function scheduleRefresh() {
   clearInterval(refreshTimer);
   const mins = clampNum(config.get().refreshMinutes, 1, 120, 5);
-  refreshTimer = setInterval(() => quota.refresh(), mins * 60e3);
+  refreshTimer = setInterval(() => {
+    // 人不在时降到半小时一次，回来时再补刷
+    if (awaySince && Date.now() - (quota.lastRefreshAt || 0) < AWAY_REFRESH_MS) return;
+    quota.refresh();
+  }, mins * 60e3);
+}
+
+// 在最近一个额度窗口的重置时间之后补刷一次，宠物能马上为“额度回满”庆祝，不用等下一轮定时刷新。
+// 太远的（比如几天后的周额度）先不排，之后每次刷新都会重新安排。
+function scheduleResetRefresh(snap) {
+  clearTimeout(resetRefreshTimer);
+  resetRefreshTimer = null;
+  const now = Date.now();
+  let next = Infinity;
+  let names = [];
+  for (const name of ['codex', 'claude']) {
+    const slot = snap[name];
+    const d = slot && slot.data;
+    if (!d || slot.status === 'off' || !Array.isArray(d.windows)) continue;
+    for (const w of d.windows) {
+      if (!(w.resetsAt > now)) continue;
+      if (w.resetsAt < next - 60e3) {
+        next = w.resetsAt;
+        names = [name];
+      } else if (w.resetsAt <= next + 60e3 && !names.includes(name)) names.push(name);
+    }
+  }
+  if (!names.length || next - now > 6 * 3600e3) return;
+  resetRefreshTimer = setTimeout(() => {
+    resetRefreshTimer = null;
+    if (!awaySince) quota.refresh(names);
+  }, next - now + 15e3);
 }
 
 function watchClaudeDesktop() {
@@ -650,12 +710,14 @@ function endPetDrag() {
   if (dragOrigin && dragMoved && petWin && !petWin.isDestroyed()) {
     logUi({ ev: 'drag', dx: petWin.getBounds().x - dragOrigin.x, dy: petWin.getBounds().y - dragOrigin.y });
     if (!TEST_DIR) config.set({ position: anchorFromBounds(petWin.getBounds()) });
+    sendEdge();
   }
   dragOrigin = null;
   dragMoved = false;
 }
 
 function resetPetInteraction() {
+  stopMotion('reset');
   endPetDrag();
   if (!petWin || petWin.isDestroyed()) return;
   // 锁屏会切换 Windows 桌面，非聚焦窗口未必收到 blur/pointerup。
@@ -674,6 +736,7 @@ function restorePetInteraction() {
   petWin.setAlwaysOnTop(true, 'screen-saver');
   if (!config.get().petHidden && !petWin.isVisible()) petWin.showInactive();
   placePanel();
+  sendEdge();
   // 不等鼠标移动或轮询去重超时，立即让页面按当前位置重新命中测试。
   sendTo(petWin, 'pet:cursor', cursorInPet());
 }
@@ -762,9 +825,183 @@ function watchClockGaps() {
   }, 1000);
 }
 
+// ---------- 甩出去、散步：主进程按物理推进窗口，页面只负责动作和挤压效果 ----------
+
+// 宠物身体：窗口底部居中的精灵图那一块
+function petBody(b, m) {
+  return { x: b.x + (b.width - m.spriteW) / 2, y: b.y + b.height - m.spriteH, w: m.spriteW, h: m.spriteH };
+}
+
+const boundsFromBody = (x, y, m) => ({
+  x: Math.round(x - (m.width - m.spriteW) / 2),
+  y: Math.round(y + m.spriteH - m.height),
+  width: m.width,
+  height: m.height,
+});
+
+// 身体左上角能到的范围：起飞时所在屏幕的工作区，脚踩在任务栏上沿。
+// 贴边时窗口两侧的透明部分会露到屏幕外，和手动拖到屏幕边上一样。
+function bodyBox(body) {
+  const wa = screen.getDisplayNearestPoint({ x: Math.round(body.x + body.w / 2), y: Math.round(body.y + body.h / 2) }).workArea;
+  return {
+    minX: wa.x,
+    maxX: Math.max(wa.x, wa.x + wa.width - body.w),
+    minY: wa.y,
+    maxY: Math.max(wa.y, wa.y + wa.height - body.h),
+  };
+}
+
+// 宠物贴着屏幕边时窗口有一截在屏幕外，告诉页面把气泡往里挪
+function sendEdge() {
+  if (!petWin || petWin.isDestroyed()) return;
+  const b = petWin.getBounds();
+  const wa = screen.getDisplayNearestPoint({ x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height - 30) }).workArea;
+  sendTo(petWin, 'pet:edge', {
+    left: Math.max(0, wa.x - b.x),
+    right: Math.max(0, b.x + b.width - (wa.x + wa.width)),
+  });
+}
+
+function stopMotion(reason) {
+  if (!motion) return;
+  const was = motion;
+  motion = null;
+  clearInterval(was.timer);
+  logUi({ ev: 'motion-end', kind: was.kind, reason });
+  sendTo(petWin, 'pet:motion', { kind: 'end', reason, was: was.kind, impact: Math.round(was.maxImpact || 0) });
+}
+
+// 页面传来的松手速度要校验：必须是有限数字，再限一下上限
+function flingVelocity(v) {
+  if (!v || typeof v !== 'object') return null;
+  const vx = Number(v.vx);
+  const vy = Number(v.vy);
+  const speed = Math.hypot(vx, vy);
+  if (!Number.isFinite(speed) || speed < Physics.RELEASE.deadZone) return null;
+  const k = Math.min(1, Physics.RELEASE.cap / speed);
+  return { vx: vx * k, vy: vy * k };
+}
+
+function startFlight(v) {
+  stopMotion('replaced');
+  if (!petWin || petWin.isDestroyed() || !petWin.isVisible()) return false;
+  const m = petMetrics();
+  const body = petBody(petWin.getBounds(), m);
+  const box = bodyBox(body);
+  const now = performance.now();
+  motion = {
+    kind: 'fly', m, box, started: now, last: now, maxImpact: 0, sliding: false, timer: null,
+    s: { x: Math.min(Math.max(body.x, box.minX), box.maxX), y: Math.min(Math.max(body.y, box.minY), box.maxY), vx: v.vx, vy: v.vy },
+  };
+  hidePanel();
+  logUi({ ev: 'fly', vx: Math.round(v.vx), vy: Math.round(v.vy) });
+  sendTo(petWin, 'pet:motion', { kind: 'fly' });
+  motion.timer = setInterval(stepFlight, MOTION_TICK);
+  return true;
+}
+
+function stepFlight() {
+  const mo = motion;
+  if (!mo || mo.kind !== 'fly') return;
+  if (!petWin || petWin.isDestroyed()) return stopMotion('gone');
+  const now = performance.now();
+  const { state, hits } = Physics.flightStep(mo.s, (now - mo.last) / 1000, mo.box);
+  mo.last = now;
+  mo.s = state;
+  for (const hit of hits) {
+    if (hit.side === 'floor') mo.maxImpact = Math.max(mo.maxImpact, hit.speed);
+    if (hit.speed >= 250) sendTo(petWin, 'pet:motion', { kind: 'impact', side: hit.side, speed: Math.round(hit.speed) });
+  }
+  // 不再弹起、还在贴地滑：换成跑步动作
+  if (!mo.sliding && Physics.grounded(state, mo.box) && state.vy === 0 && Math.abs(state.vx) >= 80) {
+    mo.sliding = true;
+    sendTo(petWin, 'pet:motion', { kind: 'slide', dir: state.vx < 0 ? 'left' : 'right' });
+  }
+  const timedOut = now - mo.started > 15000; // 兜底：怎么也停不下来就直接落地
+  if (timedOut) mo.s = { ...state, y: mo.box.maxY, vx: 0, vy: 0 };
+  petWin.setBounds(boundsFromBody(mo.s.x, mo.s.y, mo.m));
+  if (timedOut || Physics.atRest(mo.s, mo.box)) {
+    if (!TEST_DIR) config.set({ position: anchorFromBounds(petWin.getBounds()) });
+    stopMotion('land');
+    sendEdge();
+  }
+}
+
+// 散步：只在任务栏上沿走，离“家”（用户最后放下它的位置）不超过两三个身位
+function startWalk() {
+  if (motion || dragOrigin || !petWin || petWin.isDestroyed() || !petWin.isVisible()) return false;
+  if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) return false;
+  const m = petMetrics();
+  const body = petBody(petWin.getBounds(), m);
+  const box = bodyBox(body);
+  if (Math.abs(body.y - box.maxY) > 2) return false; // 被放在半空（比如别的窗口顶上）就不乱走
+  const home = config.get().position;
+  const homeX = home && Number.isFinite(home.cx) ? home.cx - m.spriteW / 2 : body.x;
+  const target = Physics.walkTarget({
+    x: body.x, minX: box.minX, maxX: box.maxX, home: homeX,
+    leash: Math.max(160, m.spriteW * 2.5), minStep: Math.max(40, m.spriteW * 0.5), maxStep: Math.max(120, m.spriteW * 2),
+  });
+  if (target == null) return false;
+  const dir = target < body.x ? -1 : 1;
+  const now = performance.now();
+  motion = {
+    kind: 'walk', m, x: body.x, y: box.maxY, target, dir, timer: null, started: now, last: now,
+    speed: Math.min(110, Math.max(45, m.spriteW * 0.7)),
+  };
+  sendTo(petWin, 'pet:motion', { kind: 'walk', dir: dir < 0 ? 'left' : 'right' });
+  motion.timer = setInterval(stepWalk, MOTION_TICK);
+  return true;
+}
+
+function stepWalk() {
+  const mo = motion;
+  if (!mo || mo.kind !== 'walk') return;
+  if (!petWin || petWin.isDestroyed()) return stopMotion('gone');
+  const now = performance.now();
+  mo.x += mo.dir * mo.speed * Math.min(0.05, (now - mo.last) / 1000);
+  mo.last = now;
+  const arrived = mo.dir < 0 ? mo.x <= mo.target : mo.x >= mo.target;
+  if (arrived) mo.x = mo.target;
+  petWin.setBounds(boundsFromBody(mo.x, mo.y, mo.m));
+  if (arrived || now - mo.started > 20000) {
+    stopMotion('arrived');
+    sendEdge();
+  }
+}
+
+// ---------- 离开就睡，回来汇报 ----------
+
+// 电脑闲置够久算离开；有输入、而且没锁屏才算回来（锁屏界面输密码不算，免得汇报气泡出现在锁屏后面）
+function checkAway() {
+  if (!petWin || petWin.isDestroyed()) return;
+  const enabled = config.get().sleepWhenAway !== false;
+  if (!awaySince) {
+    if (!enabled) return;
+    const idle = powerMonitor.getSystemIdleTime();
+    if (idle < AWAY_AFTER_S) return;
+    awaySince = Date.now() - idle * 1000;
+    stopMotion('away');
+    sendTo(petWin, 'pet:away', { away: true });
+  } else if (!enabled) {
+    awaySince = null;
+    sendTo(petWin, 'pet:away', { away: false, silent: true });
+  } else if (powerMonitor.getSystemIdleTime() < 10 && powerMonitor.getSystemIdleState(1) !== 'locked') {
+    const awayMs = Date.now() - awaySince;
+    awaySince = null;
+    sendTo(petWin, 'pet:away', { away: false, awayMs });
+    if (quota.staleness() > 60e3) quota.refresh();
+  }
+}
+
+function watchAway() {
+  clearInterval(awayTimer);
+  awayTimer = setInterval(checkAway, 2000);
+}
+
 function onQuotaUpdate(snap) {
   broadcast('quota:update', snap);
   if (tray) tray.setToolTip(['额度桌宠', ...QP.summaryLines(snap)].join('\n').slice(0, 127));
+  if (!snap.refreshing) scheduleResetRefresh(snap);
 }
 
 // ---------- 自定义协议：页面、资源和宠物精灵图都从 qp://app/ 提供，保证同源 ----------
@@ -845,6 +1082,7 @@ function registerIpc() {
   });
   ipcMain.on('pet:drag-start', (e) => {
     if (!trusted(e) || !petWin) return;
+    stopMotion('catch'); // 飞在半空、正在散步时按住，就地接住
     dragOrigin = petWin.getBounds();
     dragMoved = false;
   });
@@ -862,9 +1100,24 @@ function registerIpc() {
       height: dragOrigin.height,
     });
   });
-  ipcMain.on('pet:drag-end', (e) => {
+  ipcMain.on('pet:drag-end', (e, v) => {
     if (!trusted(e) || !petWin) return;
     endPetDrag();
+    const fling = flingVelocity(v);
+    logUi({ ev: 'release', fling: Boolean(fling) });
+    if (!fling) return;
+    // 页面已经摆出飞行动作：飞不了也要告诉它一声，让它恢复待机
+    if (config.get().throwable === false || !startFlight(fling)) {
+      sendTo(petWin, 'pet:motion', { kind: 'end', reason: 'refused', was: 'fly', impact: 0 });
+    }
+  });
+  ipcMain.on('pet:wander', (e) => {
+    if (!trusted(e)) return;
+    // 自动化测试要按固定位置点宠物，不让它自己走开
+    if (TEST_DIR || config.get().wander === false || !startWalk()) sendTo(petWin, 'pet:motion', { kind: 'refused' });
+  });
+  ipcMain.on('pet:motion-stop', (e) => {
+    if (trusted(e) && motion && motion.kind === 'walk') stopMotion('hover');
   });
   ipcMain.on('pet:click', (e) => {
     if (!trusted(e)) return;
@@ -1089,10 +1342,141 @@ async function checkSessionRecovery() {
   return { scenarios: results, hiddenPetStayedHidden: true, nativeHitTestResynchronized: true };
 }
 
+// 用合成事件把宠物甩出去（不碰真实鼠标）：要飞起来、落在任务栏上，落地后照样能点开面板；
+// 再甩一次、半空中按住，应该被接住，松手也不开面板。
+async function checkThrow() {
+  const assert = require('node:assert/strict');
+  const wc = petWin.webContents;
+  if (await wc.executeJavaScript("matchMedia('(prefers-reduced-motion: reduce)').matches")) {
+    return { skipped: '系统关闭了动画效果，宠物不会被甩出去' };
+  }
+  const original = petWin.getBounds();
+  const m = petMetrics();
+  const grip = () => {
+    const b = petWin.getBounds();
+    return { b, x: Math.round(b.width / 2), y: Math.round(b.height - m.spriteH * 0.45) };
+  };
+  // 真实拖动时窗口跟着鼠标走，鼠标相对窗口的位置不变；只有屏幕坐标在变。
+  // 要是相对坐标也跟着挪，几步之后就落到窗口外面，合成事件会被丢掉。
+  const input = (type, g, dx = 0, dy = 0, down = false) => wc.sendInputEvent({
+    type, x: g.x, y: g.y, globalX: g.b.x + g.x + dx, globalY: g.b.y + g.y + dy,
+    button: 'left', clickCount: 1, modifiers: down ? ['leftButtonDown'] : [],
+  });
+  const fling = async (vx, vy) => {
+    hidePanel();
+    const g = grip();
+    sendTo(petWin, 'pet:cursor', { x: g.x, y: g.y });
+    await sleep(80);
+    input('mouseDown', g);
+    for (let i = 1; i <= 6; i++) {
+      input('mouseMove', g, i * vx, i * vy, true);
+      await sleep(12);
+    }
+    input('mouseUp', g, 6 * vx, 6 * vy);
+    await sleep(40);
+  };
+  const waitLanding = async () => {
+    const trail = [];
+    for (let t = 0; t < 12000 && motion; t += 50) {
+      trail.push(petWin.getBounds());
+      await sleep(50);
+    }
+    return trail;
+  };
+
+  // 往左上甩：每 12ms 挪 36px（约 3000 px/s），应该先往左上飞，最后脚踩任务栏
+  uiLog.length = 0;
+  await fling(-36, -14);
+  assert.equal(motion && motion.kind, 'fly', `a fast release must start a flight: ${JSON.stringify(uiLog.slice(-8))}`);
+  const trail = await waitLanding();
+  assert.equal(motion, null, 'the pet must come to rest');
+  const b = petWin.getBounds();
+  const body = petBody(b, m);
+  const wa = screen.getDisplayNearestPoint({ x: Math.round(body.x + body.w / 2), y: Math.round(body.y + body.h / 2) }).workArea;
+  // 缩放屏幕上 getBounds 换算回 DIP 会有 1px 的取整误差
+  assert.ok(Math.abs(body.y + body.h - (wa.y + wa.height)) <= 2, `it lands on the taskbar: ${body.y + body.h} vs ${wa.y + wa.height}`);
+  assert.ok(body.x >= wa.x - 2 && body.x + body.w <= wa.x + wa.width + 2, 'it stays on the screen');
+  assert.ok(Math.min(...trail.map((p) => p.y)) < original.y, 'it flew upwards first');
+
+  const g = grip();
+  sendTo(petWin, 'pet:cursor', { x: g.x, y: g.y });
+  await sleep(80);
+  input('mouseDown', g);
+  input('mouseUp', g);
+  await sleep(200);
+  assert.equal(panelWin.isVisible(), true, 'a landed pet still opens the panel');
+
+  // 往上甩，飞到半空时按住：被接住，不再继续飞，松手也不开面板
+  uiLog.length = 0;
+  await fling(0, -40);
+  await sleep(120);
+  assert.equal(motion && motion.kind, 'fly', `a second fling must fly: ${JSON.stringify(uiLog.slice(-8))}`);
+  const c = grip();
+  input('mouseDown', c);
+  await sleep(80);
+  assert.equal(motion, null, 'pressing a flying pet catches it');
+  const caughtAt = petWin.getBounds();
+  input('mouseUp', c);
+  await sleep(250);
+  assert.equal(panelWin.isVisible(), false, 'releasing a caught pet must not open the panel');
+  assert.deepEqual(petWin.getBounds(), caughtAt, 'a caught pet stays where it was caught');
+
+  hidePanel();
+  petWin.setBounds(original);
+  sendEdge();
+  return { landed: { x: b.x, y: b.y }, flightSamples: trail.length, lowestY: Math.min(...trail.map((p) => p.y)), caughtAt };
+}
+
+// 截一组新状态的图：额度回满、撸猫、睡着、回来汇报、贴着屏幕边的气泡
+async function captureReactions(dir) {
+  const real = quota.snapshot();
+  const reset = JSON.parse(JSON.stringify(real));
+  if (reset.codex && reset.codex.data) reset.codex.data.windows[0].usedPercent = 2;
+  sendTo(petWin, 'quota:update', reset);
+  await sleep(350);
+  await capture(petWin, path.join(dir, 'pet-celebrate.png'));
+  await sleep(7000);
+  sendTo(petWin, 'quota:update', real);
+  await sleep(10500); // 等告急气泡收起
+  sendTo(petWin, 'pet:debug', { pet: true });
+  await sleep(300);
+  await capture(petWin, path.join(dir, 'pet-petted.png'));
+  await sleep(2600);
+  sendTo(petWin, 'pet:away', { away: true });
+  await sleep(900);
+  await capture(petWin, path.join(dir, 'pet-sleeping.png'));
+  sendTo(petWin, 'pet:away', { away: false, awayMs: 95 * 60e3 });
+  await sleep(3200);
+  await capture(petWin, path.join(dir, 'pet-back-report.png'));
+  await sleep(500);
+  const b = petWin.getBounds();
+  const wa = screen.getDisplayNearestPoint({ x: b.x + b.width / 2, y: b.y + b.height - 30 }).workArea;
+  petWin.setBounds({ ...b, x: Math.round(wa.x - (b.width - petMetrics().spriteW) / 2) });
+  sendEdge();
+  sendTo(petWin, 'pet:debug', { summary: true });
+  await sleep(400);
+  await capture(petWin, path.join(dir, 'pet-edge-bubble.png'));
+  petWin.setBounds(b);
+  sendEdge();
+  sendTo(petWin, 'pet:cursor', { x: 3, y: 3 });
+  await sleep(400);
+}
+
+function watchRendererErrors(win) {
+  const errors = [];
+  win.webContents.on('console-message', (e, level, message) => {
+    const lv = e && e.level !== undefined ? e.level : level;
+    const msg = e && e.message !== undefined ? e.message : message;
+    if (lv === 'error' || lv === 'warning' || lv === 3 || lv === 2) errors.push(String(msg));
+  });
+  return errors;
+}
+
 // 用合成事件走一遍交互（不碰真实鼠标）：悬停 → 穿透 → 看向 → 拖动 → 点击开面板
 async function runSnapshot(dir) {
   fs.mkdirSync(dir, { recursive: true });
   const report = {};
+  const petErrors = watchRendererErrors(petWin);
   const mark = (name) => {
     report[name] = uiLog.splice(0);
   };
@@ -1178,7 +1562,10 @@ async function runSnapshot(dir) {
   await capture(settingsWin, path.join(dir, 'settings-light.png'));
   updateConfig({ theme: themeBefore });
   report.themeRestoredTo = config.get().theme;
+  await captureReactions(dir);
+  report.throw = await checkThrow();
   report.sessionRecovery = await checkSessionRecovery();
+  report.rendererErrors = petErrors;
   fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2));
   app.exit(0);
 }
@@ -1210,6 +1597,8 @@ async function start() {
   watchDisplays();
   watchPowerEvents();
   watchClockGaps();
+  // 自动化测试按固定位置操作宠物，不能让它中途睡着
+  if (!TEST_DIR) watchAway();
   logRecovery('started', { version: app.getVersion(), displays: screen.getAllDisplays().map((d) => ({
     id: d.id, bounds: d.bounds, workArea: d.workArea, scaleFactor: d.scaleFactor,
   })) });
@@ -1219,8 +1608,11 @@ async function start() {
   if (INTERACTION_TEST_DIR) {
     fs.mkdirSync(INTERACTION_TEST_DIR, { recursive: true });
     (async () => {
+      const petErrors = watchRendererErrors(petWin);
       await sleep(1600);
       const report = await checkSessionRecovery();
+      report.throw = await checkThrow();
+      report.rendererErrors = petErrors;
       fs.writeFileSync(path.join(INTERACTION_TEST_DIR, 'report.json'), JSON.stringify(report, null, 2));
       app.exit(0);
     })().catch((err) => {
@@ -1252,7 +1644,10 @@ app.on('before-quit', () => {
   clearInterval(refreshTimer);
   clearInterval(cursorTimer);
   clearInterval(heartbeatTimer);
+  clearInterval(awayTimer);
   clearTimeout(petRefitTimer);
   clearTimeout(resumeRefreshTimer);
+  clearTimeout(resetRefreshTimer);
+  if (motion) clearInterval(motion.timer);
   fs.unwatchFile(DESKTOP_HISTORY_FILE);
 });
