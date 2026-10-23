@@ -17,10 +17,6 @@
   let quota = null;
   let config = {};
 
-  const monthDay = (ts) => {
-    const d = new Date(ts);
-    return `${d.getMonth() + 1}/${d.getDate()}`;
-  };
   const planName = (p) => (p ? String(p).charAt(0).toUpperCase() + String(p).slice(1) : '');
 
   function meterLabel(w) {
@@ -49,6 +45,15 @@
 
   const note = (text, tone = '') => `<div class="note ${tone}">${esc(text)}</div>`;
 
+  // 悬停重置卡时浮出每张卡的到期时间和剩余时长
+  function creditTip(expiries, now) {
+    if (!expiries || !expiries.length) return '';
+    const rows = expiries
+      .map((t) => `<span>${esc(QP.when(t, now))}</span><b>${t > now ? `还剩 ${esc(QP.duration(t - now))}` : '已到期'}</b>`)
+      .join('');
+    return `<span class="tip" role="tooltip"><span class="tip-title">重置卡到期时间</span>${rows}</span>`;
+  }
+
   function codexBody(d, now) {
     let html = d.windows.map((w) => meter(w, now)).join('');
     for (const ex of d.extras || []) {
@@ -57,8 +62,7 @@
     const chips = [];
     if (d.limitReached) chips.push('<span class="chip danger">已触发限额</span>');
     if (d.resetCredits && d.resetCredits.count) {
-      const exp = d.resetCredits.nextExpiresAt ? `，最早 ${monthDay(d.resetCredits.nextExpiresAt)} 到期` : '';
-      chips.push(`<span class="chip">可用重置卡 ×${d.resetCredits.count}${exp}</span>`);
+      chips.push(`<span class="chip">可用重置卡 ×${d.resetCredits.count}${creditTip(d.resetCredits.expiries, now)}</span>`);
     }
     if (chips.length) html += `<div class="chips">${chips.join('')}</div>`;
     if (d.note) html += note(d.note, 'warn');

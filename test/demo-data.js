@@ -19,7 +19,7 @@ module.exports = function demoRunners() {
         ],
         extras: [],
         limitReached: null,
-        resetCredits: { count: 1, nextExpiresAt: now + 5 * D },
+        resetCredits: { count: 2, expiries: [now + 5 * D, now + 13.5 * D] },
       };
     },
     claude: async () => {

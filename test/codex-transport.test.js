@@ -19,6 +19,18 @@ const wham = {
   },
   rate_limit_reset_credits: { available_count: 3 },
 };
+const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
+const CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits';
+const creditList = {
+  credits: [
+    { status: 'available', expires_at: '2026-11-06T23:00:07.890890Z' },
+    { status: 'redeemed', expires_at: '2026-10-25T00:00:00Z' },
+    { status: 'available', expires_at: '2026-10-29T18:34:21.239135Z' },
+    { status: 'available', expires_at: '2026-11-12T08:00:00Z' },
+  ],
+  available_count: 3,
+};
+const ok = (body) => ({ ok: true, status: 200, json: async () => body });
 const appServerResult = {
   rateLimits: {
     planType: 'plus',
@@ -80,20 +92,27 @@ function harness({ auth = { tokens: { access_token: 'test-token', account_id: 't
 
 test('codex: 令牌查询成功时完全不查找或启动 codex.exe', async () => {
   const { fetchCodex, stats } = harness();
+  const urls = [];
   const result = await fetchCodex({
     codexPath: 'codex.exe',
     fetchImpl: async (url, options) => {
-      assert.equal(url, 'https://chatgpt.com/backend-api/wham/usage');
+      urls.push(url);
       assert.equal(options.headers.Authorization, 'Bearer test-token');
       assert.equal(options.headers['ChatGPT-Account-Id'], 'test-account');
       assert.equal(options.redirect, 'error');
-      return { ok: true, status: 200, json: async () => wham };
+      return ok(url === CREDITS_URL ? creditList : wham);
     },
   });
+  assert.deepEqual(urls, [USAGE_URL, CREDITS_URL]);
   assert.equal(result.source, 'http');
   assert.equal(result.windows[0].usedPercent, 12);
   assert.equal(result.windows[1].resetsAt, 1792955930000);
   assert.equal(result.resetCredits.count, 3);
+  assert.deepEqual(Array.from(result.resetCredits.expiries), [
+    Date.parse('2026-10-29T18:34:21.239Z'),
+    Date.parse('2026-11-06T23:00:07.890Z'),
+    Date.parse('2026-11-12T08:00:00Z'),
+  ]);
   assert.equal(stats.lookups, 0);
   assert.equal(stats.spawns, 0);
 });
@@ -101,9 +120,9 @@ test('codex: 令牌查询成功时完全不查找或启动 codex.exe', async () 
 test('codex: 每次刷新重读登录缓存，跟随 Codex 自身更新的令牌和账号', async () => {
   const { fetchCodex, stats, auth } = harness();
   const seen = [];
-  const fetchImpl = async (_url, options) => {
+  const fetchImpl = async (url, options) => {
     seen.push([options.headers.Authorization, options.headers['ChatGPT-Account-Id']]);
-    return { ok: true, status: 200, json: async () => wham };
+    return ok(url === CREDITS_URL ? creditList : wham);
   };
   await fetchCodex({ fetchImpl });
   auth.tokens.access_token = 'updated-test-token';
@@ -111,10 +130,46 @@ test('codex: 每次刷新重读登录缓存，跟随 Codex 自身更新的令牌
   await fetchCodex({ fetchImpl });
   assert.deepEqual(seen, [
     ['Bearer test-token', 'test-account'],
+    ['Bearer test-token', 'test-account'],
+    ['Bearer updated-test-token', 'updated-test-account'],
     ['Bearer updated-test-token', 'updated-test-account'],
   ]);
   assert.equal(stats.reads, 2);
   assert.equal(stats.spawns, 0);
+});
+
+test('codex: 重置卡到期时间查不到时照常显示额度和卡数', async (t) => {
+  const failures = [
+    ['网络错误', async () => { throw new Error('网络错误'); }],
+    ['HTTP 500', async () => ({ ok: false, status: 500 })],
+  ];
+  for (const [name, fail] of failures) {
+    await t.test(name, async () => {
+      const { fetchCodex, stats } = harness();
+      const result = await fetchCodex({
+        codexPath: 'codex.exe',
+        fetchImpl: async (url) => (url === CREDITS_URL ? fail() : ok(wham)),
+      });
+      assert.equal(result.source, 'http');
+      assert.equal(result.windows[0].usedPercent, 12);
+      assert.equal(result.resetCredits.count, 3);
+      assert.equal(result.resetCredits.expiries.length, 0);
+      assert.equal(stats.spawns, 0);
+    });
+  }
+});
+
+test('codex: 没有重置卡时不再多查一次', async () => {
+  const { fetchCodex } = harness();
+  const urls = [];
+  const result = await fetchCodex({
+    fetchImpl: async (url) => {
+      urls.push(url);
+      return ok({ ...wham, rate_limit_reset_credits: { available_count: 0 } });
+    },
+  });
+  assert.deepEqual(urls, [USAGE_URL]);
+  assert.equal(result.resetCredits, null);
 });
 
 test('codex: 直连失败后才启动一次后台备用查询，查询完即关闭', async (t) => {

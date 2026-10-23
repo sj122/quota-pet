@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const { codexHome, localAppData } = require('../paths');
 
 const CLIENT_VERSION = require('../../package.json').version;
+const WHAM_URL = 'https://chatgpt.com/backend-api/wham';
 
 // 依次查找 codex 可执行文件：手动指定 > Codex 桌面端自带的 bin（取最新的） > PATH。
 function findCodexExe(override) {
@@ -127,7 +128,7 @@ function normalizeAppServer(result) {
   const credits = ((result.rateLimitResetCredits && result.rateLimitResetCredits.credits) || []).filter(
     (c) => c.status === 'available'
   );
-  const expiries = credits.map((c) => c.expiresAt * 1000).filter(Boolean);
+  const expiries = credits.map((c) => c.expiresAt * 1000).filter(Boolean).sort((a, b) => a - b);
   return {
     source: 'app-server',
     plan: rl.planType || null,
@@ -137,7 +138,7 @@ function normalizeAppServer(result) {
     resetCredits: credits.length
       ? {
           count: result.rateLimitResetCredits.availableCount ?? credits.length,
-          nextExpiresAt: expiries.length ? Math.min(...expiries) : null,
+          expiries,
         }
       : null,
   };
@@ -169,8 +170,17 @@ function normalizeWham(j, now = Date.now()) {
     windows,
     extras: [],
     limitReached: j.rate_limit_reached_type || (rl.limit_reached ? 'limit' : null),
-    resetCredits: rc && rc.available_count ? { count: rc.available_count, nextExpiresAt: null } : null,
+    resetCredits: rc && rc.available_count ? { count: rc.available_count, expiries: [] } : null,
   };
+}
+
+// wham/rate-limit-reset-credits 列出每张重置卡，到期时间是 ISO 字符串。
+function normalizeCreditList(j) {
+  return ((j && j.credits) || [])
+    .filter((c) => c && c.status === 'available')
+    .map((c) => Date.parse(c.expires_at))
+    .filter(Boolean)
+    .sort((a, b) => a - b);
 }
 
 // 优先通路：直接用 ~/.codex/auth.json 里的令牌查询，无需启动 codex 进程。
@@ -184,19 +194,33 @@ async function readViaHttp(fetchImpl) {
   }
   const t = auth.tokens || {};
   if (!t.access_token) throw new Error('Codex 没有用 ChatGPT 账号登录');
-  const res = await fetchImpl('https://chatgpt.com/backend-api/wham/usage', {
-    headers: {
-      Authorization: `Bearer ${t.access_token}`,
-      'ChatGPT-Account-Id': t.account_id || '',
-      'User-Agent': `quota-pet/${CLIENT_VERSION}`,
-      Accept: 'application/json',
-    },
-    redirect: 'error',
-  });
+  const get = (url) =>
+    fetchImpl(url, {
+      headers: {
+        Authorization: `Bearer ${t.access_token}`,
+        'ChatGPT-Account-Id': t.account_id || '',
+        'User-Agent': `quota-pet/${CLIENT_VERSION}`,
+        Accept: 'application/json',
+      },
+      redirect: 'error',
+    });
+  const res = await get(`${WHAM_URL}/usage`);
   if (res.status === 401) throw new Error('Codex 登录令牌已失效');
   if (res.status === 403) throw new Error('Codex 直连接口拒绝访问');
   if (!res.ok) throw new Error(`Codex 接口返回 HTTP ${res.status}`);
-  return normalizeWham(await res.json());
+  const data = normalizeWham(await res.json());
+  if (data.resetCredits) data.resetCredits.expiries = await readCreditExpiries(get);
+  return data;
+}
+
+// 用量接口只给重置卡数量，每张卡的到期时间要再查一次；查不到就只显示数量。
+async function readCreditExpiries(get) {
+  try {
+    const res = await get(`${WHAM_URL}/rate-limit-reset-credits`);
+    return res.ok ? normalizeCreditList(await res.json()) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function fetchCodex({ fetchImpl, codexPath } = {}) {
@@ -221,4 +245,4 @@ async function fetchCodex({ fetchImpl, codexPath } = {}) {
   }
 }
 
-module.exports = { fetchCodex, findCodexExe, normalizeAppServer, normalizeWham };
+module.exports = { fetchCodex, findCodexExe, normalizeAppServer, normalizeWham, normalizeCreditList };

@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { normalizeAppServer, normalizeWham } = require('../src/providers/codex');
+const { normalizeAppServer, normalizeWham, normalizeCreditList } = require('../src/providers/codex');
 const { estimateReset, mergeSamples, fromDesktop, normalizeOAuthUsage } = require('../src/providers/claude');
 const { computeSpend, recordSnapshot, parseBalance } = require('../src/providers/deepseek');
 const QP = require('../renderer/shared');
@@ -24,8 +24,8 @@ test('codex: app-server 结果规整为 5 小时 + 每周两个窗口', () => {
     rateLimitResetCredits: {
       availableCount: 2,
       credits: [
-        { status: 'available', expiresAt: 1792699101 },
         { status: 'available', expiresAt: 1793298861 },
+        { status: 'available', expiresAt: 1792699101 },
         { status: 'used', expiresAt: 1790000000 },
       ],
     },
@@ -38,7 +38,7 @@ test('codex: app-server 结果规整为 5 小时 + 每周两个窗口', () => {
       ['secondary', 19, 10080, 1792955930000],
     ]
   );
-  assert.deepEqual(r.resetCredits, { count: 2, nextExpiresAt: 1792699101000 });
+  assert.deepEqual(r.resetCredits, { count: 2, expiries: [1792699101000, 1793298861000] });
 });
 
 test('codex: API Key 登录没有额度时报错', () => {
@@ -57,7 +57,21 @@ test('codex: 直连 wham/usage 的结果也能规整', () => {
   assert.equal(r.windows[0].windowMins, 300);
   assert.equal(r.windows[1].windowMins, 10080);
   assert.equal(r.windows[1].resetsAt, 1792955930000);
-  assert.equal(r.resetCredits.count, 3);
+  assert.deepEqual(r.resetCredits, { count: 3, expiries: [] });
+});
+
+test('codex: 重置卡列表只取可用的卡，到期时间从早到晚排', () => {
+  const expiries = normalizeCreditList({
+    credits: [
+      { status: 'available', expires_at: '2026-11-06T23:00:07.890890Z' },
+      { status: 'redeemed', expires_at: '2026-10-25T00:00:00Z' },
+      { status: 'available', expires_at: '2026-10-29T18:34:21.239135Z' },
+      { status: 'available' },
+    ],
+    available_count: 2,
+  });
+  assert.deepEqual(expiries, [Date.parse('2026-10-29T18:34:21.239Z'), Date.parse('2026-11-06T23:00:07.890Z')]);
+  assert.deepEqual(normalizeCreditList({}), []);
 });
 
 test('claude: OAuth 用量接口', () => {

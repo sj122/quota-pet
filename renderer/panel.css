@@ -253,6 +253,7 @@ body {
 }
 
 .chips {
+  position: relative; /* 重置卡明细以整行左端为基准弹出，旁边有其他标签时也不会被卡片右边裁掉 */
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -270,6 +271,41 @@ body {
 .chip.danger {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* 悬停重置卡时的到期明细：向上弹出盖住额度条，避免被卡片底边裁掉 */
+.tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 1;
+  display: none;
+  grid-template-columns: auto auto;
+  gap: 4px 16px;
+  padding: 8px 11px 9px;
+  border-radius: 10px;
+  background: var(--bubble-bg);
+  box-shadow: var(--shadow), 0 0 0 1px var(--line);
+  color: var(--text-2);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.chip:hover > .tip {
+  display: grid;
+}
+
+.tip-title {
+  grid-column: 1 / -1;
+  color: var(--text-3);
+}
+
+.tip b {
+  font-weight: 600;
+  color: var(--text);
+  text-align: right;
 }
 
 .note {
