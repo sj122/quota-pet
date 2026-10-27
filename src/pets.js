@@ -88,7 +88,11 @@ function loadPetDir(dir, source) {
 }
 
 function listPets(extraDirs = []) {
-  const roots = [{ dir: path.join(codexHome, 'pets'), source: 'codex' }, ...extraDirs];
+  const roots = [
+    { dir: path.join(codexHome, 'pets'), source: 'codex' },
+    ...extraDirs,
+    { dir: path.join(__dirname, '../assets/pets'), source: 'bundled' },
+  ];
   const pets = [];
   const seen = new Set();
   for (const { dir, source } of roots) {

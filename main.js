@@ -27,6 +27,13 @@ const { fetchClaude, DESKTOP_HISTORY_FILE } = require('./src/providers/claude');
 const deepseek = require('./src/providers/deepseek');
 const QP = require('./renderer/shared');
 const Physics = require('./renderer/physics');
+const { LinuxSurface, desktopBounds } = require('./src/linux-surface');
+
+// Wayland 不提供全局鼠标位置和窗口定位所需的接口。存在 XWayland 时使用 X11，
+// 才能让透明区域穿透、拖动和悬停命中判断正常工作。
+if (process.platform === 'linux' && process.env.DISPLAY && !app.commandLine.hasSwitch('ozone-platform')) {
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
+}
 
 const ROOT = __dirname;
 const argValue = (name) => {
@@ -37,7 +44,10 @@ const SELFTEST = process.argv.includes('--selftest');
 const SNAPSHOT_DIR = argValue('--snapshot');
 const DEMO = process.argv.includes('--demo');
 const INTERACTION_TEST_DIR = argValue('--interaction-test');
-const TEST_DIR = INTERACTION_TEST_DIR || SNAPSHOT_DIR;
+const LINUX_TEST_DIR = argValue('--linux-surface-test');
+const TEST_DIR = LINUX_TEST_DIR || INTERACTION_TEST_DIR || SNAPSHOT_DIR;
+// X11 使用固定透明画布，宠物移动只更新画布内的位置。
+const LINUX_SURFACE = process.platform === 'linux' && (!TEST_DIR || Boolean(LINUX_TEST_DIR));
 // 自动化使用独立配置，避免更改用户的主题、位置、隐藏设置和登录状态。
 app.setPath('userData', TEST_DIR
   ? path.resolve(TEST_DIR, 'profile')
@@ -88,6 +98,8 @@ let panelHeight = 460;
 let dragOrigin = null;
 let dragMoved = false;
 let dragStartedAt = 0;
+let linuxDrag = null;
+let linuxSurface = null;
 let pointerDown = false;
 let refreshTimer = null;
 let cursorTimer = null;
@@ -179,7 +191,7 @@ function makeRunners() {
 function loadPets() {
   pets = listPets([{ dir: userFile('pets'), source: 'custom' }]);
   const want = config.get().petId;
-  currentPet = pets.find((p) => p.id === want) || pets.find((p) => p.hasLookFrames) || pets[0] || null;
+  currentPet = pets.find((p) => p.id === want) || pets.find((p) => p.id === 'nailong') || pets.find((p) => p.hasLookFrames) || pets[0] || null;
 }
 
 function spriteUrl(p) {
@@ -234,7 +246,7 @@ function defaultAnchor(m) {
 
 // 优先回到保存的位置；那块屏不在了就沿用当前位置，都不在屏幕上再放回主屏右下角。
 function petAnchor(m) {
-  const current = petWin && !petWin.isDestroyed() ? anchorFromBounds(petWin.getBounds()) : null;
+  const current = petWin && !petWin.isDestroyed() ? anchorFromBounds(getPetBounds()) : null;
   const a = [config.get().position, current].find(anchorVisible) || defaultAnchor(m);
   const wa = screen.getDisplayNearestPoint({ x: Math.round(a.cx), y: Math.round(a.bottom - 30) }).workArea;
   // 分辨率缩小或任务栏移动后，脚底仍在屏幕内也可能只露出半只宠物。
@@ -285,8 +297,10 @@ function createPetWindow() {
   bubbleHitRect = null;
   passthroughIgnoring = null;
   pointerDown = false;
+  const initialBounds = boundsFromAnchor(petAnchor(m), m);
+  const overlay = LINUX_SURFACE ? desktopBounds(screen.getAllDisplays()) : null;
   const win = new BrowserWindow({
-    ...boundsFromAnchor(petAnchor(m), m),
+    ...(overlay || initialBounds),
     show: false,
     frame: false,
     transparent: true,
@@ -301,16 +315,26 @@ function createPetWindow() {
     alwaysOnTop: true,
     // Windows 非激活窗口在远程控制/桌面切换后可能只收到 mouseUp，丢掉 mouseDown。
     // 允许点击时激活；启动和恢复仍用 showInactive()，不主动抢焦点。
-    focusable: process.platform === 'win32',
+    focusable: true,
     title: 'QuotaPet',
     webPreferences: webPrefs({ backgroundThrottling: false }),
   });
   petWin = win;
+  if (LINUX_TEST_DIR) win.webContents.on('console-message', (event) => {
+    console.log('[linux-renderer]', event.level, event.message);
+  });
   win.setAlwaysOnTop(true, 'screen-saver');
-  // 透明区域鼠标穿透；主进程按页面传来的透明度图决定何时关掉穿透
-  win.setIgnoreMouseEvents(true, { forward: true });
-  passthroughIgnoring = true;
-  win.loadURL('qp://app/renderer/pet.html');
+  // Linux 只修改 X11 输入区域，绘制画布始终保持固定。
+  if (LINUX_SURFACE) {
+    linuxSurface = new LinuxSurface(win, screen, initialBounds, overlay, onLinuxCursor, (message) => {
+      logRecovery('linux-surface-error', { message });
+    });
+    updateLinuxInput();
+  } else {
+    win.setIgnoreMouseEvents(true, { forward: true });
+    passthroughIgnoring = true;
+  }
+  win.loadURL(`qp://app/renderer/${LINUX_SURFACE ? 'linux-surface.html' : 'pet.html'}`);
   // 缩放按源（qp://app）共享并会记进配置。旧版的默认菜单能用 Ctrl+加号 放大面板，宠物也被一起放大，
   // 页面坐标就和窗口对不上了；每次加载都恢复 100%。
   const wc = win.webContents;
@@ -319,7 +343,9 @@ function createPetWindow() {
     lastPetHeartbeat = performance.now();
     lastCursorAckAt = performance.now();
     probeFailStreak = 0;
-    restorePetInteraction('load');
+    // Linux 的 iframe 在顶层页面载入后异步创建，等它明确就绪再探测。
+    if (linuxSurface) linuxSurface.publish();
+    else restorePetInteraction('load');
     // 页面重载或整窗重建时人还没回来：接着睡
     if (awaySince) sendTo(win, 'pet:away', { away: true });
   });
@@ -330,7 +356,11 @@ function createPetWindow() {
   });
   win.on('closed', () => {
     // 重建窗口时旧窗口的 closed 事件晚到，不能把新窗口的引用清掉。
-    if (petWin === win) petWin = null;
+    if (petWin === win) {
+      if (linuxSurface) linuxSurface.close();
+      linuxSurface = null;
+      petWin = null;
+    }
   });
 }
 
@@ -339,6 +369,9 @@ function recreatePetWindow() {
   logRecovery('rebuild-window');
   stopMotion('rebuild'); // 飞行、散步的定时器还在挪旧窗口
   const old = petWin;
+  if (linuxSurface) linuxSurface.close();
+  linuxSurface = null;
+  linuxDrag = null;
   petWin = null;
   if (old && !old.isDestroyed()) {
     try {
@@ -384,7 +417,7 @@ function createPanelWindow() {
 function placePanel() {
   if (!panelWin || panelWin.isDestroyed() || !petWin) return;
   const m = petMetrics();
-  const b = petWin.getBounds();
+  const b = getPetBounds();
   const sprite = { x: b.x + (b.width - m.spriteW) / 2, y: b.y + b.height - m.spriteH, w: m.spriteW, h: m.spriteH };
   const wa = screen.getDisplayNearestPoint({
     x: Math.round(sprite.x + sprite.w / 2),
@@ -591,6 +624,8 @@ function publicConfig() {
 
 function fullState() {
   return {
+    linuxNativeDrag: LINUX_SURFACE,
+    surface: linuxSurface ? linuxSurface.frame() : null,
     quota: quota.snapshot(),
     config: publicConfig(),
     pet: petInfo(),
@@ -614,7 +649,7 @@ function applyPet() {
   if (!petWin) return;
   stopMotion('resize');
   const m = petMetrics();
-  petWin.setBounds(boundsFromAnchor(anchorFromBounds(petWin.getBounds()), m));
+  setPetBounds(boundsFromAnchor(anchorFromBounds(getPetBounds()), m));
   hitMap = null; // 换了宠物/大小，页面稍后会上传新的透明度图
   applyPassthrough(cursorInPet(), 'pet-change');
   sendTo(petWin, 'pet:changed', { pet: petInfo(), metrics: m, config: publicConfig() });
@@ -723,8 +758,8 @@ function watchClaudeDesktop() {
 // 页面被缩放、或缩放比例没跟上显示器时，窗口像素和 CSS 像素并不是 1:1。
 // Windows 上先换成物理像素：几块屏缩放不同时，DIP 坐标跨屏不连续。
 function cursorInPet() {
-  const p = screen.getCursorScreenPoint();
-  const b = petWin.getBounds();
+  const p = linuxSurface && linuxSurface.cursor ? linuxSurface.cursor : screen.getCursorScreenPoint();
+  const b = getPetBounds();
   if (process.platform !== 'win32') return { x: p.x - b.x, y: p.y - b.y, w: b.width, h: b.height };
   const pp = screen.dipToScreenPoint(p);
   const pb = screen.dipToScreenRect(petWin, b);
@@ -739,6 +774,7 @@ function startCursorPolling() {
   let lastHitTestAt = -Infinity;
   cursorTimer = setInterval(() => {
     if (!petWin || petWin.isDestroyed() || !petWin.isVisible()) return;
+
     const c = cursorInPet();
     applyPassthrough(c, 'poll');
     const key = `${c.x},${c.y},${c.w},${c.h}`;
@@ -759,10 +795,53 @@ function startCursorPolling() {
 
 const inRect = (x, y, r) => x >= r.left && x <= r.left + r.width && y >= r.top && y <= r.top + r.height;
 
+// 输入区域独立于绘制区域，宠物特效不会被窗口形状裁切。
+function updateLinuxInput() {
+  if (!linuxSurface || !petWin || petWin.isDestroyed()) return;
+  const b = getPetBounds();
+  const m = hitMap;
+  const pm = petMetrics();
+  const sx = m && m.viewport.w > 0 ? b.width / m.viewport.w : 1;
+  const sy = m && m.viewport.h > 0 ? b.height / m.viewport.h : 1;
+  const sprite = m && m.sprite ? m.sprite : {
+    left: (b.width - pm.spriteW) / 2, top: b.height - pm.spriteH,
+    width: pm.spriteW, height: pm.spriteH,
+  };
+  const frame = linuxSurface.frame();
+  const rect = (r, pad) => ({
+    x: Math.floor(frame.x + r.left * sx - pad),
+    y: Math.floor(frame.y + r.top * sy - pad),
+    width: Math.ceil(r.width * sx + pad * 2),
+    height: Math.ceil(r.height * sy + pad * 2),
+  });
+  const regions = [rect(sprite, 4)];
+  if (bubbleHitRect) regions.push(rect(bubbleHitRect, 4));
+  linuxSurface.setInputRects(regions);
+}
+
+function getPetBounds() {
+  return linuxSurface ? { ...linuxSurface.bounds } : petWin.getBounds();
+}
+
+function setPetBounds(bounds) {
+  if (!linuxSurface) return petWin.setBounds(bounds);
+  linuxSurface.setBounds(bounds);
+  updateLinuxInput();
+}
+
+function onLinuxCursor(p) {
+  if (!linuxDrag || !dragOrigin || !petWin || petWin.isDestroyed()) return;
+  linuxDrag.samples.push({ x: p.x, y: p.y, t: performance.now() });
+  if (linuxDrag.samples.length > 32) linuxDrag.samples.shift();
+  if (!dragMoved) return;
+  setPetBounds({ x: Math.round(dragOrigin.x + p.x - linuxDrag.start.x),
+    y: Math.round(dragOrigin.y + p.y - linuxDrag.start.y) });
+}
+
 // 光标（窗口物理像素）是否落在当前帧的不透明像素上。页面没给透明度图时退回精灵矩形。
 function maskHitAt(c) {
   if (!petWin || petWin.isDestroyed()) return null;
-  const b = petWin.getBounds();
+  const b = getPetBounds();
   if (!(b.width > 0) || !(b.height > 0)) return null;
   const m = hitMap;
   if (!m || !m.sprite) {
@@ -821,17 +900,22 @@ function setPassthrough(ignore, reason) {
 
 function applyPassthrough(c = cursorInPet(), reason = 'poll') {
   if (!petWin || petWin.isDestroyed()) return;
+  if (LINUX_SURFACE) {
+    updateLinuxInput();
+    return;
+  }
   const hit = maskHitAt(c);
   setPassthrough(!(hit === true || bubbleHitAt(c) || pointerDown), reason);
 }
 
 function endPetDrag() {
   if (dragOrigin && dragMoved && petWin && !petWin.isDestroyed()) {
-    logUi({ ev: 'drag', dx: petWin.getBounds().x - dragOrigin.x, dy: petWin.getBounds().y - dragOrigin.y });
-    if (!TEST_DIR) config.set({ position: anchorFromBounds(petWin.getBounds()) });
+    logUi({ ev: 'drag', dx: getPetBounds().x - dragOrigin.x, dy: getPetBounds().y - dragOrigin.y });
+    if (!TEST_DIR) config.set({ position: anchorFromBounds(getPetBounds()) });
     sendEdge();
   }
   dragOrigin = null;
+  linuxDrag = null;
   dragMoved = false;
   dragStartedAt = 0;
   pointerDown = false;
@@ -845,8 +929,12 @@ function resetPetInteraction() {
   // 锁屏会切换 Windows 桌面，非聚焦窗口未必收到 blur/pointerup。
   // 同时清掉页面缓存、捕获和原生穿透转发；仅重发鼠标坐标会被页面的状态去重跳过。
   passthroughIgnoring = null;
-  petWin.setIgnoreMouseEvents(true, { forward: true });
-  passthroughIgnoring = true;
+  if (LINUX_SURFACE) {
+    updateLinuxInput();
+  } else {
+    petWin.setIgnoreMouseEvents(true, { forward: true });
+    passthroughIgnoring = true;
+  }
   sendTo(petWin, 'pet:interaction-reset');
 }
 
@@ -891,7 +979,7 @@ async function restorePetInteraction(reason = 'restore') {
   if (!petWin || petWin.isDestroyed()) return false;
   resetPetInteraction();
   const m = petMetrics();
-  petWin.setBounds(boundsFromAnchor(petAnchor(m), m));
+  setPetBounds(boundsFromAnchor(petAnchor(m), m));
   if (process.platform === 'win32') {
     petWin.setFocusable(true);
     // Electron 的 setFocusable(true) 会同时取消 skipTaskbar，需要重新隐藏任务栏入口。
@@ -932,6 +1020,11 @@ function watchDisplays() {
       });
       // 旧拖动基于旧屏幕坐标，先取消；不能等拖动结束才恢复，否则漏收松手会永久跳过校准。
       hidePanel();
+      if (linuxSurface) {
+        const overlay = desktopBounds(screen.getAllDisplays());
+        linuxSurface.overlay = overlay;
+        petWin.setBounds(overlay);
+      }
       hitMap = null; // 分辨率/缩放变了，页面稍后会重新上传
       resetPetInteraction();
       schedulePetRefit();
@@ -1068,7 +1161,7 @@ function bodyBox(body) {
 // 宠物贴着屏幕边时窗口有一截在屏幕外，告诉页面把气泡往里挪
 function sendEdge() {
   if (!petWin || petWin.isDestroyed()) return;
-  const b = petWin.getBounds();
+  const b = getPetBounds();
   const wa = screen.getDisplayNearestPoint({ x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height - 30) }).workArea;
   sendTo(petWin, 'pet:edge', {
     left: Math.max(0, wa.x - b.x),
@@ -1100,7 +1193,7 @@ function startFlight(v) {
   stopMotion('replaced');
   if (!petWin || petWin.isDestroyed() || !petWin.isVisible()) return false;
   const m = petMetrics();
-  const body = petBody(petWin.getBounds(), m);
+  const body = petBody(getPetBounds(), m);
   const box = bodyBox(body);
   const now = performance.now();
   motion = {
@@ -1133,9 +1226,9 @@ function stepFlight() {
   }
   const timedOut = now - mo.started > 15000; // 兜底：怎么也停不下来就直接落地
   if (timedOut) mo.s = { ...state, y: mo.box.maxY, vx: 0, vy: 0 };
-  petWin.setBounds(boundsFromBody(mo.s.x, mo.s.y, mo.m));
+  setPetBounds(boundsFromBody(mo.s.x, mo.s.y, mo.m));
   if (timedOut || Physics.atRest(mo.s, mo.box)) {
-    if (!TEST_DIR) config.set({ position: anchorFromBounds(petWin.getBounds()) });
+    if (!TEST_DIR) config.set({ position: anchorFromBounds(getPetBounds()) });
     stopMotion('land');
     sendEdge();
   }
@@ -1146,7 +1239,7 @@ function startWalk() {
   if (motion || dragOrigin || !petWin || petWin.isDestroyed() || !petWin.isVisible()) return false;
   if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) return false;
   const m = petMetrics();
-  const body = petBody(petWin.getBounds(), m);
+  const body = petBody(getPetBounds(), m);
   const box = bodyBox(body);
   if (Math.abs(body.y - box.maxY) > 2) return false; // 被放在半空（比如别的窗口顶上）就不乱走
   const home = config.get().position;
@@ -1176,7 +1269,7 @@ function stepWalk() {
   mo.last = now;
   const arrived = mo.dir < 0 ? mo.x <= mo.target : mo.x >= mo.target;
   if (arrived) mo.x = mo.target;
-  petWin.setBounds(boundsFromBody(mo.x, mo.y, mo.m));
+  setPetBounds(boundsFromBody(mo.x, mo.y, mo.m));
   if (arrived || now - mo.started > 20000) {
     stopMotion('arrived');
     sendEdge();
@@ -1273,6 +1366,9 @@ function trusted(e) {
 }
 
 function registerIpc() {
+  ipcMain.on('pet:surface-ready', (e) => {
+    if (trusted(e) && linuxSurface && petWin && e.sender === petWin.webContents) restorePetInteraction('surface-ready');
+  });
   ipcMain.handle('state:get', (e) => (trusted(e) ? fullState() : null));
   ipcMain.handle('quota:refresh', async (e) => {
     if (trusted(e)) await quota.refresh();
@@ -1348,7 +1444,11 @@ function registerIpc() {
   ipcMain.on('pet:drag-start', (e) => {
     if (!trusted(e) || !petWin) return;
     stopMotion('catch'); // 飞在半空、正在散步时按住，就地接住
-    dragOrigin = petWin.getBounds();
+    dragOrigin = getPetBounds();
+    if (LINUX_SURFACE && linuxSurface && linuxSurface.cursor) {
+      const p = linuxSurface.cursor;
+      linuxDrag = { start: { x: p.x, y: p.y }, samples: [{ x: p.x, y: p.y, t: performance.now() }] };
+    }
     dragMoved = false;
     dragStartedAt = performance.now();
     pointerDown = true;
@@ -1361,17 +1461,20 @@ function registerIpc() {
       hidePanel();
     }
     // 用 setBounds 固定宽高：高 DPI 下反复 setPosition 会让透明窗口越拖越大
-    petWin.setBounds({
-      x: Math.round(dragOrigin.x + Number(dx || 0)),
-      y: Math.round(dragOrigin.y + Number(dy || 0)),
-      width: dragOrigin.width,
-      height: dragOrigin.height,
-    });
+    if (!linuxDrag) {
+      setPetBounds({
+        x: Math.round(dragOrigin.x + Number(dx || 0)),
+        y: Math.round(dragOrigin.y + Number(dy || 0)),
+        width: dragOrigin.width,
+        height: dragOrigin.height,
+      });
+    }
   });
-  ipcMain.on('pet:drag-end', (e, v) => {
+  ipcMain.on('pet:drag-end', (e, v, allowFling) => {
     if (!trusted(e) || !petWin) return;
+    const actualFling = linuxDrag ? (allowFling ? Physics.releaseVelocity(linuxDrag.samples, performance.now()) : null) : v;
     endPetDrag();
-    const fling = flingVelocity(v);
+    const fling = flingVelocity(actualFling);
     logUi({ ev: 'release', fling: Boolean(fling) });
     if (!fling) return;
     // 页面已经摆出飞行动作：飞不了也要告诉它一声，让它恢复待机
@@ -1502,7 +1605,7 @@ async function checkSessionRecovery() {
     ['renderer-hang'],
   ];
   const input = (type, x, y, down = false) => {
-    const b = petWin.getBounds();
+    const b = getPetBounds();
     wc.sendInputEvent({
       type, x, y, globalX: b.x + x, globalY: b.y + y,
       button: 'left', clickCount: 1, modifiers: down ? ['leftButtonDown'] : [],
@@ -1510,7 +1613,7 @@ async function checkSessionRecovery() {
   };
   // 测试里不能用真实鼠标，所以把“光标在这里”同时喂给页面和主进程的穿透判断。
   const hoverAt = (x, y, forceHitTest = false) => {
-    const b = petWin.getBounds();
+    const b = getPetBounds();
     sendTo(petWin, 'pet:cursor', { x, y, forceHitTest });
     applyPassthrough({ x, y, w: b.width, h: b.height }, 'test');
   };
@@ -1531,7 +1634,7 @@ async function checkSessionRecovery() {
     try {
       hidePanel();
       uiLog.length = 0;
-      const b = petWin.getBounds();
+      const b = getPetBounds();
       const x = Math.round(b.width / 2);
       const y = Math.round(b.height - petMetrics().spriteH * 0.45);
       hoverAt(x, y);
@@ -1569,7 +1672,7 @@ async function checkSessionRecovery() {
       await sleep(1650); // 同时覆盖显示器布局稳定后的二次校准。
       assert.equal(dragOrigin, null, `session recovery must clear the main-process drag: ${events}`);
       if (virtualDisplay) {
-        const b = petWin.getBounds();
+        const b = getPetBounds();
         const wa = virtualDisplay.workArea;
         assert.ok(b.x >= wa.x && b.x + b.width <= wa.x + wa.width, 'pet must fit the reduced desktop');
       }
@@ -1579,13 +1682,13 @@ async function checkSessionRecovery() {
       assert.equal(panelWin.isVisible(), false, `late mouseUp must not open the panel: ${events}`);
       hoverAt(x, y);
       await sleep(60);
-      const before = petWin.getBounds();
+      const before = getPetBounds();
       input('mouseDown', x, y);
       input('mouseMove', x - 24, y, true);
       await sleep(80);
       input('mouseUp', x, y);
       await sleep(80);
-      const dx = petWin.getBounds().x - before.x;
+      const dx = getPetBounds().x - before.x;
       assert.equal(dx, -24, `dragging must work after session recovery: ${events}`);
       input('mouseDown', x, y);
       input('mouseUp', x, y);
@@ -1597,7 +1700,7 @@ async function checkSessionRecovery() {
     }
   }
   hidePanel();
-  const c = petWin.getBounds();
+  const c = getPetBounds();
   const atPet = { x: Math.round(c.width / 2), y: Math.round(c.height - petMetrics().spriteH * 0.45) };
   hoverAt(atPet.x, atPet.y);
   await sleep(60);
@@ -1645,10 +1748,10 @@ async function checkThrow() {
   if (await wc.executeJavaScript("matchMedia('(prefers-reduced-motion: reduce)').matches")) {
     return { skipped: '系统关闭了动画效果，宠物不会被甩出去' };
   }
-  const original = petWin.getBounds();
+  const original = getPetBounds();
   const m = petMetrics();
   const grip = () => {
-    const b = petWin.getBounds();
+    const b = getPetBounds();
     return { b, x: Math.round(b.width / 2), y: Math.round(b.height - m.spriteH * 0.45) };
   };
   // 真实拖动时窗口跟着鼠标走，鼠标相对窗口的位置不变；只有屏幕坐标在变。
@@ -1673,7 +1776,7 @@ async function checkThrow() {
   const waitLanding = async () => {
     const trail = [];
     for (let t = 0; t < 12000 && motion; t += 50) {
-      trail.push(petWin.getBounds());
+      trail.push(getPetBounds());
       await sleep(50);
     }
     return trail;
@@ -1685,7 +1788,7 @@ async function checkThrow() {
   assert.equal(motion && motion.kind, 'fly', `a fast release must start a flight: ${JSON.stringify(uiLog.slice(-8))}`);
   const trail = await waitLanding();
   assert.equal(motion, null, 'the pet must come to rest');
-  const b = petWin.getBounds();
+  const b = getPetBounds();
   const body = petBody(b, m);
   const wa = screen.getDisplayNearestPoint({ x: Math.round(body.x + body.w / 2), y: Math.round(body.y + body.h / 2) }).workArea;
   // 缩放屏幕上 getBounds 换算回 DIP 会有 1px 的取整误差
@@ -1710,14 +1813,14 @@ async function checkThrow() {
   input('mouseDown', c);
   await sleep(80);
   assert.equal(motion, null, 'pressing a flying pet catches it');
-  const caughtAt = petWin.getBounds();
+  const caughtAt = getPetBounds();
   input('mouseUp', c);
   await sleep(250);
   assert.equal(panelWin.isVisible(), false, 'releasing a caught pet must not open the panel');
-  assert.deepEqual(petWin.getBounds(), caughtAt, 'a caught pet stays where it was caught');
+  assert.deepEqual(getPetBounds(), caughtAt, 'a caught pet stays where it was caught');
 
   hidePanel();
-  petWin.setBounds(original);
+  setPetBounds(original);
   sendEdge();
   return { landed: { x: b.x, y: b.y }, flightSamples: trail.length, lowestY: Math.min(...trail.map((p) => p.y)), caughtAt };
 }
@@ -1744,14 +1847,14 @@ async function captureReactions(dir) {
   await sleep(3200);
   await capture(petWin, path.join(dir, 'pet-back-report.png'));
   await sleep(500);
-  const b = petWin.getBounds();
+  const b = getPetBounds();
   const wa = screen.getDisplayNearestPoint({ x: b.x + b.width / 2, y: b.y + b.height - 30 }).workArea;
-  petWin.setBounds({ ...b, x: Math.round(wa.x - (b.width - petMetrics().spriteW) / 2) });
+  setPetBounds({ ...b, x: Math.round(wa.x - (b.width - petMetrics().spriteW) / 2) });
   sendEdge();
   sendTo(petWin, 'pet:debug', { summary: true });
   await sleep(400);
   await capture(petWin, path.join(dir, 'pet-edge-bubble.png'));
-  petWin.setBounds(b);
+  setPetBounds(b);
   sendEdge();
   sendTo(petWin, 'pet:cursor', { x: 3, y: 3 });
   await sleep(400);
@@ -1785,7 +1888,7 @@ async function runSnapshot(dir) {
   await sleep(4000); // 等开场问候气泡消失
 
   const m = petMetrics();
-  const b0 = petWin.getBounds();
+  const b0 = getPetBounds();
   const cx = Math.round(b0.width / 2);
   const cy = Math.round(b0.height - m.spriteH * 0.45);
   uiLog.length = 0;
@@ -1819,8 +1922,8 @@ async function runSnapshot(dir) {
   wc.sendInputEvent({ type: 'mouseUp', x: cx + 64, y: cy, globalX: gx + 64, globalY: gy, button: 'left', clickCount: 1 });
   await sleep(300);
   mark('dragRight');
-  report.windowMovedBy = { dx: petWin.getBounds().x - b0.x, dy: petWin.getBounds().y - b0.y };
-  petWin.setBounds(b0);
+  report.windowMovedBy = { dx: getPetBounds().x - b0.x, dy: getPetBounds().y - b0.y };
+  setPetBounds(b0);
 
   sendTo(petWin, 'pet:cursor', { x: cx, y: cy });
   await sleep(200);
@@ -1849,7 +1952,7 @@ async function runSnapshot(dir) {
   sendTo(petWin, 'pet:debug', { summary: true });
   await sleep(500);
   await capture(petWin, path.join(dir, 'pet-dark.png'));
-  report.bounds = { pet: petWin.getBounds(), panel: panelWin.getBounds(), workArea: screen.getPrimaryDisplay().workArea };
+  report.bounds = { pet: getPetBounds(), panel: panelWin.getBounds(), workArea: screen.getPrimaryDisplay().workArea };
 
   openSettings();
   await sleep(2500);
@@ -1891,7 +1994,7 @@ async function start() {
   createPetWindow();
   createPanelWindow();
   createTray();
-  if (!TEST_DIR) startCursorPolling();
+  if (!TEST_DIR || LINUX_TEST_DIR) startCursorPolling();
   watchDisplays();
   watchPowerEvents();
   watchClockGaps();
@@ -1948,6 +2051,7 @@ app.on('before-quit', () => {
   clearTimeout(resumeRefreshTimer);
   clearTimeout(resetRefreshTimer);
   if (motion) clearInterval(motion.timer);
+  if (linuxSurface) linuxSurface.close();
   for (const done of probeWaiters.values()) done(false);
   probeWaiters.clear();
   fs.unwatchFile(DESKTOP_HISTORY_FILE);

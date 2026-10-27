@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const api = window.quotaPet;
+  const api = window.petApi || window.quotaPet;
   const QP = window.QP;
   const PHYS = window.QPPhysics;
   const spriteEl = document.getElementById('sprite');
@@ -28,6 +28,7 @@
   let interactive = false;
   let pressed = null;
   let dragging = false;
+  let linuxNativeDrag = false;
   let hovering = false;
   let hoverTimer = 0;
   let looking = false;
@@ -466,8 +467,9 @@
       spriteEl.releasePointerCapture(pointerId);
     } catch {}
     // 松手前一小段拖得够快就是“甩出去”，交给主进程按物理飞；慢慢放下就停在原地
-    const fling = moved && !cancelled && e && canThrow() ? PHYS.releaseVelocity(samples, e.timeStamp) : null;
-    api.dragEnd(fling);
+    const allowFling = Boolean(moved && !cancelled && e && canThrow());
+    const fling = allowFling && !linuxNativeDrag ? PHYS.releaseVelocity(samples, e.timeStamp) : null;
+    api.dragEnd(fling, allowFling);
     lastActivity = Date.now();
     if (e && Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
       lastPointer = { x: e.clientX, y: e.clientY };
@@ -496,6 +498,9 @@
     if (pressed && (e.buttons & 1) === 0) release(null, true);
     onPointer(e.clientX, e.clientY);
     if (hovering && !pressed && !motion) trackStroke(e.clientX, e.clientY);
+  });
+  window.addEventListener('mouseleave', () => {
+    if (!pressed) onPointer(-1, -1);
   });
   // 主进程给的是窗口像素坐标和窗口尺寸，按视口比例换成 CSS 像素，页面缩放后也能对准宠物。
   api.onCursor(({ x, y, w, h, forceHitTest, seq }) => {
@@ -908,11 +913,13 @@
 
   (async () => {
     const st = await api.getState();
+    linuxNativeDrag = Boolean(st.linuxNativeDrag);
     cfg = st.config || {};
     snapshot = st.quota;
     lastSeen = snapshot && !snapshot.refreshing ? snapshot : null;
     refreshing = Boolean(snapshot && snapshot.refreshing);
     await loadPet(st.pet, st.metrics);
+    if (linuxNativeDrag) api.surfaceReady();
     updateBadge();
     setTimeout(() => {
       if (hovering || panelVisible || bubbleKind || sleeping || motion) return;

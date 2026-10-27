@@ -4,7 +4,7 @@ const { safeStorage } = require('electron');
 const { JsonFile } = require('./store');
 
 const DEFAULTS = {
-  petId: null,
+  petId: 'nailong',
   scale: 0.6,
   refreshMinutes: 5,
   position: null,

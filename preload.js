@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('quotaPet', {
   // 宠物窗口
   onPet: listen('pet:changed'),
   onCursor: listen('pet:cursor'),
+  onSurface: listen('pet:surface'),
+  surfaceReady: () => ipcRenderer.send('pet:surface-ready'),
   onInteractionReset: listen('pet:interaction-reset'),
   onProbe: listen('pet:probe'),
   interactionHeartbeat: () => ipcRenderer.send('pet:heartbeat'),
@@ -38,7 +40,7 @@ contextBridge.exposeInMainWorld('quotaPet', {
   dragStart: () => ipcRenderer.send('pet:drag-start'),
   dragMove: (dx, dy) => ipcRenderer.send('pet:drag-move', dx, dy),
   // fling：松手时甩出去的速度 { vx, vy }（px/s），轻轻放下时为 null
-  dragEnd: (fling) => ipcRenderer.send('pet:drag-end', fling || null),
+  dragEnd: (fling, allowFling) => ipcRenderer.send('pet:drag-end', fling || null, Boolean(allowFling)),
   wander: () => ipcRenderer.send('pet:wander'),
   motionStop: () => ipcRenderer.send('pet:motion-stop'),
   petClick: () => ipcRenderer.send('pet:click'),
